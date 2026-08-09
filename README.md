@@ -2,8 +2,6 @@
 
 Browse, upload, and move files between your Directus storage locations (local disk, S3, Google Cloud, Azure, and more) — without losing the file’s identity in Directus.
 
-Open **Storage** from the left bar (**admins only**).
-
 > **Important:** This extension moves or copies the **actual files** between storage backends and updates where Directus looks for them. Prefer **Copy** when you try a new storage for the first time; use **Move** only when you are sure the new location is correct.
 
 ## Overview
@@ -51,8 +49,8 @@ Files keep the same ID in Directus. Only their storage location changes. Image t
 ## Getting started
 
 1. Make sure your project has more than one storage location configured (for example `local` and `s3`).
-2. As an admin, open **Settings → Project Settings → Modules** and enable **Storage**.
-3. Open **Storage** from the left bar.
+2. As an admin, open **Settings → Project Settings → Modules** and enable **Storage Manager**.
+3. Open **Storage Manager** from the left bar.
 4. Pick a storage card (or **Folders**) and browse files.
 5. Select files (or migrate all on that storage / folder), choose a **target storage**, then **Move** or **Copy**.
 
@@ -95,8 +93,8 @@ npm run build
 4. In the Data Studio:
 
    1. Open **Settings → Project Settings → Modules**
-   2. Enable **Storage**
-   3. Open **Storage** from the left bar
+   2. Enable **Storage Manager**
+   3. Open **Storage Manager** from the left bar
 
 ## License
 

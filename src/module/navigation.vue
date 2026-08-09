@@ -94,7 +94,7 @@ function setOpenFolders() {
 				<v-icon name="dashboard" />
 			</v-list-item-icon>
 			<v-list-item-content>
-				<v-text-overflow text="Storage" />
+				<v-text-overflow text="Storage Manager" />
 			</v-list-item-content>
 		</v-list-item>
 
