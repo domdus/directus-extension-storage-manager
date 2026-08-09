@@ -8,6 +8,8 @@ Open **Storage** from the left bar (**admins only**).
 
 ## Overview
 
+<img alt="Storage overview with local, S3, and GCS adapters" src="https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_migration.png" width="800" />
+
 Directus can use several storage locations at once, but it does not move existing files for you when you change storage. **Storage Manager** fills that gap: see what lives on each adapter, upload new files, find files on disk that are missing from Directus, and migrate selected files or whole folders between storages.
 
 Files keep the same ID in Directus. Only their storage location changes. Image thumbnails are moved or copied with them when possible.
@@ -27,10 +29,14 @@ Files keep the same ID in Directus. Only their storage location changes. Image t
 
 ### Migrate
 
+<img alt="Migrate Files drawer — choose target storage and Move or Copy" src="https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_migration_files.png" width="800" />
+
 - **Migrate selected** files, **all files on a storage**, or a **whole folder**
 - **Move** — after a successful transfer, remove the file from the old storage
 - **Copy** — leave a copy on the old storage (it will no longer be linked in Directus; you can clean it up or re-import with Detect)
 - Live progress: from → to, current file, amount transferred, and speed
+
+<img alt="Migrate progress from GCS to local storage" src="https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_migration_storage_gcs.png" width="800" />
 
 ### Detect files
 
