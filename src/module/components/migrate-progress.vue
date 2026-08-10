@@ -44,9 +44,9 @@
 		</div>
 
 		<div class="counts">
-			<span class="ok">{{ succeeded }} ok</span>
-			<span class="skip">{{ skipped }} skipped</span>
-			<span class="fail">{{ failed }} failed</span>
+			<span class="ok">{{ succeeded }} Ok</span>
+			<span class="skip">{{ skipped }} Skipped</span>
+			<span class="fail">{{ failed }} Failed</span>
 		</div>
 	</div>
 </template>
@@ -72,6 +72,7 @@ const props = defineProps<{
 	skipped: number;
 	failed: number;
 	isDone: boolean;
+	isCancelled?: boolean;
 }>();
 
 function meta(location: string | null) {
@@ -102,6 +103,7 @@ const percentRounded = computed(() => Math.round(percent.value));
 
 const statusLabel = computed(() => {
 	if (!props.isDone) return 'Transferring';
+	if (props.isCancelled) return 'Cancelled';
 	if (props.failed > 0) return 'Completed with errors';
 	return 'Completed';
 });

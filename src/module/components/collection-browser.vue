@@ -20,7 +20,9 @@ import { useDropUpload } from '../composables/use-drop-upload';
 import { useFilesBrowserPreset } from '../composables/use-files-browser-preset';
 import { useFolders } from '../composables/use-folders';
 import { useStorageManager } from '../composables/use-storage-manager';
+import { useMigrateJob } from '../composables/use-migrate-job';
 import { getFolderFilter, getStorageFilter, mergeFilters } from '../utils/filters';
+import { formatBytes } from '../../shared/format';
 
 const props = defineProps<{
 	mode: 'folders' | 'storage';
@@ -32,6 +34,7 @@ const route = useRoute();
 const router = useRouter();
 const { folders } = useFolders();
 const { storages, loadStorages } = useStorageManager();
+const { running: migrateRunning, reopenNonce } = useMigrateJob();
 
 const layoutRef = ref();
 const selection = ref<string[]>([]);
@@ -164,6 +167,31 @@ async function onImported() {
 	selection.value = [];
 	await refresh();
 }
+
+// Refresh list when a background (or any) migrate job finishes while this view is mounted.
+watch(migrateRunning, async (now, was) => {
+	if (was && !now) {
+		selection.value = [];
+		await refresh();
+	}
+});
+
+// Progress toast click → reopen migrate drawer with live details.
+watch(reopenNonce, () => {
+	if (migrateRunning.value) drawerOpen.value = true;
+});
+
+watch(
+	() => String(route.query.migrateJob || ''),
+	(value) => {
+		if (value !== '1') return;
+		drawerOpen.value = true;
+		const next = { ...route.query };
+		delete next.migrateJob;
+		router.replace({ path: route.path, query: next });
+	},
+	{ immediate: true },
+);
 
 const uploadPreset = computed(() => {
 	if (props.mode === 'storage') {

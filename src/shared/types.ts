@@ -81,6 +81,8 @@ export type MigrateResponse = {
 	/** Planned total bytes from source filesize metadata. */
 	total_bytes?: number;
 	elapsed_ms?: number;
+	/** True when the user aborted the job (not a hard failure). */
+	cancelled?: boolean;
 };
 
 /** Server → client progress events (SSE `/migrate/stream`). */

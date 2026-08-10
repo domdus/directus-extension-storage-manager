@@ -8,26 +8,17 @@
 		@cancel="close"
 	>
 		<template #actions>
-			<v-button
-				v-if="!running && !result"
-				v-tooltip.bottom="confirmLabel"
-				:disabled="!canSubmit"
-				icon
-				rounded
-				@click="submit"
-			>
-				<v-icon name="check" />
-			</v-button>
-			<v-button
-				v-else-if="running"
-				v-tooltip.bottom="'Cancel'"
-				icon
-				rounded
-				secondary
-				@click="cancel"
-			>
-				<v-icon name="close" />
-			</v-button>
+			<template v-if="!jobRunning && !localResult">
+				<v-button
+					v-tooltip.bottom="confirmLabel"
+					:disabled="!canSubmit"
+					icon
+					rounded
+					@click="submit"
+				>
+					<v-icon name="check" />
+				</v-button>
+			</template>
 		</template>
 
 		<div class="drawer-body">
@@ -35,7 +26,16 @@
 				{{ summaryText }}
 			</p>
 
-			<template v-if="!running && !result">
+			<v-notice v-if="jobRunning && jobBackgrounded" type="info">
+				Transfer continues in the background. You can close this drawer and navigate elsewhere in Studio.
+			</v-notice>
+
+			<v-notice v-else-if="otherJobRunning" type="warning">
+				Another migration is already running in the background. Wait for it to finish or cancel it from the
+				progress toast.
+			</v-notice>
+
+			<template v-if="!jobRunning && !localResult">
 				<div class="field">
 					<label>Target Storage</label>
 					<v-select
@@ -66,7 +66,7 @@
 			</template>
 
 			<migrate-progress
-				v-if="running || result"
+				v-if="(jobRunning && !jobBackgrounded) || localResult"
 				:storages="storages"
 				:mode="mode"
 				:from="progress.from"
@@ -81,30 +81,52 @@
 				:succeeded="progress.succeeded"
 				:skipped="progress.skipped"
 				:failed="progress.failed"
-				:is-done="Boolean(result) && !running"
+				:is-done="Boolean(localResult) && !jobRunning"
+				:is-cancelled="Boolean(localResult?.cancelled)"
 			/>
 
-			<div v-if="result" class="result">
-				<v-notice :type="result.failed ? 'danger' : 'success'">
-					{{ result.succeeded }} succeeded · {{ result.skipped }} skipped · {{ result.failed }} failed
-					(of {{ result.total }})
+			<div v-if="jobRunning && !jobBackgrounded" class="background-actions">
+				<v-button secondary class="background-btn" @click="detachToBackground">
+					Run in Background
+				</v-button>
+				<v-button kind="danger" secondary class="background-btn" @click="cancelTransfer">
+					Cancel Transfer
+				</v-button>
+				<p class="note">
+					Closing this drawer also runs in the background. Click the progress toast anytime for details.
+				</p>
+			</div>
+
+			<div v-if="localResult" class="result">
+				<v-notice v-if="localResult.cancelled" type="warning" icon="cancel">
+					Migration cancelled.
+					{{ localResult.succeeded.toLocaleString() }} file(s) finished before stop
+					<span v-if="localResult.total">
+						(of {{ localResult.total.toLocaleString() }} planned)</span
+					>.
 				</v-notice>
-				<div v-if="failedRows.length" class="failures">
+				<v-notice v-else :type="localResult.failed ? 'danger' : 'success'">
+					{{ localResult.succeeded }} succeeded · {{ localResult.skipped }} skipped ·
+					{{ localResult.failed }} failed (of {{ localResult.total }})
+				</v-notice>
+				<div v-if="!localResult.cancelled && failedRows.length" class="failures">
 					<div v-for="row in failedRows.slice(0, 20)" :key="row.id" class="fail-row">
 						<strong>{{ row.filename_disk || row.id }}</strong>
 						<span>{{ row.error }}</span>
 					</div>
 				</div>
+				<v-button secondary class="background-btn" @click="dismissResult">Done</v-button>
 			</div>
 		</div>
 	</v-drawer>
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue';
-import { useStorageManager } from '../composables/use-storage-manager';
+import { computed, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { useMigrateJob } from '../composables/use-migrate-job';
 import MigrateProgress from './migrate-progress.vue';
-import type { MigrateMode, MigrateProgressEvent, MigrateResponse, StorageLocationInfo } from '../../shared/types';
+import type { MigrateMode, MigrateResponse, StorageLocationInfo } from '../../shared/types';
 import { formatBytes } from '../../shared/format';
 
 const props = defineProps<{
@@ -123,61 +145,125 @@ const emit = defineEmits<{
 	(e: 'done', result: MigrateResponse): void;
 }>();
 
-const { migrateWithProgress } = useStorageManager();
+const route = useRoute();
+const router = useRouter();
+
+const {
+	running: jobRunning,
+	backgrounded: jobBackgrounded,
+	progress,
+	result: jobResult,
+	activeMode,
+	activeTarget,
+	start,
+	runInBackground,
+	attachForeground,
+	cancel: cancelJob,
+	clearListeners,
+	clearLastResult,
+} = useMigrateJob();
 
 const target = ref<string | null>(null);
 const mode = ref<MigrateMode>('move');
 const recursive = ref(true);
-const running = ref(false);
-const result = ref<MigrateResponse | null>(null);
-let abortController: AbortController | null = null;
+const localResult = ref<MigrateResponse | null>(null);
+/** True when this drawer instance owns the in-foreground job. */
+const ownsForegroundJob = ref(false);
 
-const progress = reactive({
-	from: null as string | null,
-	to: '',
-	currentIndex: 0,
-	totalFiles: 0,
-	currentName: '',
-	transferredBytes: 0,
-	totalBytes: 0,
-	elapsedMs: 0,
-	speedBps: 0,
-	succeeded: 0,
-	skipped: 0,
-	failed: 0,
-});
+const otherJobRunning = computed(
+	() => jobRunning.value && !ownsForegroundJob.value && !jobBackgrounded.value && !props.modelValue,
+);
+const canSubmit = computed(() => Boolean(target.value) && !jobRunning.value);
 
-function resetProgress(to = '') {
-	progress.from = props.sourceStorage || null;
-	progress.to = to;
-	progress.currentIndex = 0;
-	progress.totalFiles = props.estimatedCount || props.fileIds?.length || 0;
-	progress.currentName = '';
-	progress.transferredBytes = 0;
-	progress.totalBytes = props.estimatedBytes || 0;
-	progress.elapsedMs = 0;
-	progress.speedBps = 0;
-	progress.succeeded = 0;
-	progress.skipped = 0;
-	progress.failed = 0;
+function bindForegroundListeners() {
+	attachForeground({
+		onDone: (r) => {
+			localResult.value = r;
+			ownsForegroundJob.value = false;
+			emit('done', r);
+		},
+		onCancel: (r) => {
+			localResult.value = r;
+			ownsForegroundJob.value = false;
+		},
+		onError: (err) => {
+			localResult.value = {
+				mode: (activeMode.value || mode.value) as MigrateMode,
+				target_storage: activeTarget.value || target.value || '',
+				total: progress.totalFiles,
+				succeeded: progress.succeeded,
+				skipped: progress.skipped,
+				failed: Math.max(1, progress.failed),
+				results: [
+					{
+						id: '',
+						filename_disk: '',
+						from: progress.from || '',
+						to: activeTarget.value || target.value || '',
+						status: 'failed',
+						error: err.message || 'Migration failed',
+					},
+				],
+				transferred_bytes: progress.transferredBytes,
+				total_bytes: progress.totalBytes,
+				elapsed_ms: progress.elapsedMs,
+			};
+			ownsForegroundJob.value = false;
+		},
+	});
+	ownsForegroundJob.value = true;
+	if (activeMode.value) mode.value = activeMode.value;
+	if (activeTarget.value) target.value = activeTarget.value;
+	if (jobResult.value) localResult.value = jobResult.value;
+}
+
+function showCompletedResult(res: MigrateResponse) {
+	localResult.value = res;
+	ownsForegroundJob.value = false;
+	if (res.mode) mode.value = res.mode;
+	if (res.target_storage) target.value = res.target_storage;
+}
+
+function resetToForm() {
+	localResult.value = null;
+	ownsForegroundJob.value = false;
+	const first = props.storages.find((s) => s.location !== props.sourceStorage);
+	target.value = first?.location || null;
+	mode.value = 'move';
+	recursive.value = true;
 }
 
 watch(
 	() => props.modelValue,
 	(open) => {
-		if (open) {
-			result.value = null;
-			running.value = false;
-			abortController?.abort();
-			abortController = null;
-			const first = props.storages.find((s) => s.location !== props.sourceStorage);
-			target.value = first?.location || null;
-			mode.value = 'move';
-			recursive.value = true;
-			resetProgress(first?.location || '');
+		if (!open) return;
+
+		// Live job → attach and show progress.
+		if (jobRunning.value) {
+			bindForegroundListeners();
+			return;
 		}
+
+		// Finished in background (or while this drawer was open) → show summary, not empty form.
+		if (jobResult.value) {
+			showCompletedResult(jobResult.value);
+			return;
+		}
+
+		resetToForm();
 	},
 );
+
+// If the job completes while the drawer is already open, surface the result immediately.
+watch(jobResult, (res) => {
+	if (!props.modelValue || !res || jobRunning.value) return;
+	showCompletedResult(res);
+});
+
+watch(jobRunning, (now, was) => {
+	if (!props.modelValue || !was || now) return;
+	if (jobResult.value) showCompletedResult(jobResult.value);
+});
 
 const targetChoices = computed(() =>
 	props.storages
@@ -189,21 +275,20 @@ const targetChoices = computed(() =>
 );
 
 const confirmLabel = computed(() => (mode.value === 'move' ? 'Move' : 'Copy'));
-const canSubmit = computed(() => Boolean(target.value) && !running.value);
 
 const summaryText = computed(() => {
-	// After migrate (or while running), prefer job totals — parent refresh can
-	// zero out estimatedCount once files left the source storage.
-	const count = result.value?.total
-		?? (running.value && progress.totalFiles > 0 ? progress.totalFiles : null)
-		?? props.estimatedCount
-		?? props.fileIds?.length
-		?? 0;
-	const byteValue = result.value?.total_bytes
-		?? (running.value && progress.totalBytes > 0 ? progress.totalBytes : null)
-		?? props.estimatedBytes;
+	const count =
+		localResult.value?.total ??
+		(jobRunning.value && progress.totalFiles > 0 ? progress.totalFiles : null) ??
+		props.estimatedCount ??
+		props.fileIds?.length ??
+		0;
+	const byteValue =
+		localResult.value?.total_bytes ??
+		(jobRunning.value && progress.totalBytes > 0 ? progress.totalBytes : null) ??
+		props.estimatedBytes;
 	const bytes = byteValue != null ? ` (${formatBytes(byteValue)})` : '';
-	const done = Boolean(result.value);
+	const done = Boolean(localResult.value);
 
 	if (props.selectionKind === 'storage') {
 		return done
@@ -220,164 +305,122 @@ const summaryText = computed(() => {
 		: `Migrate ${count.toLocaleString()} selected file(s)${bytes}.`;
 });
 
-const failedRows = computed(() => (result.value?.results || []).filter((r) => r.status === 'failed'));
+const failedRows = computed(() => (localResult.value?.results || []).filter((r) => r.status === 'failed'));
 
 function onDrawerToggle(value: boolean) {
-	if (!value && running.value) return;
+	if (!value && jobRunning.value && ownsForegroundJob.value && !jobBackgrounded.value) {
+		// Closing the drawer while transferring = minimize to background toast.
+		detachToBackground();
+		return;
+	}
 	emit('update:modelValue', value);
 }
 
 function close() {
-	if (running.value) {
-		cancel();
+	if (jobRunning.value && ownsForegroundJob.value && !jobBackgrounded.value) {
+		detachToBackground();
 		return;
 	}
 	emit('update:modelValue', false);
 }
 
-function cancel() {
-	abortController?.abort();
+function cancelTransfer() {
+	cancelJob();
 }
 
-function applyProgressEvent(event: MigrateProgressEvent) {
-	if (event.type === 'start') {
-		progress.from = event.from || props.sourceStorage || null;
-		progress.to = event.to;
-		progress.totalFiles = event.total;
-		progress.totalBytes = event.total_bytes;
-		progress.currentIndex = 0;
-		progress.currentName = '';
-		progress.transferredBytes = 0;
-		progress.elapsedMs = 0;
-		progress.speedBps = 0;
-		progress.succeeded = 0;
-		progress.skipped = 0;
-		progress.failed = 0;
+function dismissResult() {
+	clearLastResult();
+	localResult.value = null;
+	emit('update:modelValue', false);
+}
+
+function detachToBackground() {
+	const path = route.path.startsWith('/storage-manager') ? route.path : '/storage-manager';
+	if (
+		!runInBackground({
+			returnTo: path,
+			navigate: () => {
+				router.push({ path, query: { ...route.query, migrateJob: '1' } });
+			},
+		})
+	) {
 		return;
 	}
-
-	if (event.type === 'file_start') {
-		progress.currentIndex = event.index;
-		progress.totalFiles = event.total;
-		progress.currentName = event.name || event.filename_disk;
-		if (!progress.from) progress.from = event.from;
-		progress.to = event.to;
-		return;
-	}
-
-	if (event.type === 'file_bytes') {
-		progress.currentIndex = event.index;
-		progress.transferredBytes = event.transferred_bytes;
-		progress.totalBytes = event.total_bytes || progress.totalBytes;
-		progress.elapsedMs = event.elapsed_ms;
-		progress.speedBps = event.elapsed_ms > 0 ? (event.transferred_bytes * 1000) / event.elapsed_ms : 0;
-		return;
-	}
-
-	if (event.type === 'file_done') {
-		progress.currentIndex = event.index;
-		progress.totalFiles = event.total;
-		progress.currentName = event.name || event.result.filename_disk;
-		progress.succeeded = event.succeeded;
-		progress.skipped = event.skipped;
-		progress.failed = event.failed;
-		progress.transferredBytes = event.transferred_bytes;
-		progress.totalBytes = event.total_bytes || progress.totalBytes;
-		progress.elapsedMs = event.elapsed_ms;
-		progress.speedBps = event.elapsed_ms > 0 ? (event.transferred_bytes * 1000) / event.elapsed_ms : 0;
-		return;
-	}
-
-	if (event.type === 'done') {
-		progress.succeeded = event.data.succeeded;
-		progress.skipped = event.data.skipped;
-		progress.failed = event.data.failed;
-		progress.transferredBytes = event.data.transferred_bytes ?? progress.transferredBytes;
-		progress.totalBytes = event.data.total_bytes ?? progress.totalBytes;
-		progress.elapsedMs = event.data.elapsed_ms ?? progress.elapsedMs;
-		progress.totalFiles = event.data.total;
-		progress.currentIndex = event.data.total;
-		progress.speedBps =
-			progress.elapsedMs > 0 ? (progress.transferredBytes * 1000) / progress.elapsedMs : 0;
-	}
+	ownsForegroundJob.value = false;
+	emit('update:modelValue', false);
 }
 
 async function submit() {
-	if (!target.value || running.value) return;
-	running.value = true;
-	result.value = null;
-	resetProgress(target.value);
-	abortController = new AbortController();
+	if (!target.value || jobRunning.value) return;
+
+	localResult.value = null;
+	ownsForegroundJob.value = true;
+
+	const payload = {
+		target_storage: target.value,
+		mode: mode.value,
+		concurrency: 1 as number,
+		file_ids: undefined as string[] | undefined,
+		source_storage: undefined as string | undefined,
+		folder_id: undefined as string | null | undefined,
+		recursive: undefined as boolean | undefined,
+	};
+
+	if (props.selectionKind === 'files') {
+		payload.file_ids = props.fileIds || [];
+	} else if (props.selectionKind === 'storage') {
+		payload.source_storage = props.sourceStorage || undefined;
+	} else if (props.selectionKind === 'folder') {
+		payload.folder_id = props.folderId ?? null;
+		payload.recursive = recursive.value;
+		if (props.sourceStorage) payload.source_storage = props.sourceStorage;
+	}
 
 	try {
-		const payload: Parameters<typeof migrateWithProgress>[0] = {
-			target_storage: target.value,
-			mode: mode.value,
-			concurrency: 1,
-		};
-
-		if (props.selectionKind === 'files') {
-			payload.file_ids = props.fileIds || [];
-		} else if (props.selectionKind === 'storage') {
-			payload.source_storage = props.sourceStorage || undefined;
-		} else if (props.selectionKind === 'folder') {
-			payload.folder_id = props.folderId ?? null;
-			payload.recursive = recursive.value;
-			if (props.sourceStorage) payload.source_storage = props.sourceStorage;
-		}
-
-		const res = await migrateWithProgress(payload, applyProgressEvent, abortController.signal);
-		result.value = res;
-		emit('done', res);
-	} catch (err: any) {
-		if (err?.name === 'AbortError') {
-			result.value = {
-				mode: mode.value,
-				target_storage: target.value,
-				total: progress.totalFiles,
-				succeeded: progress.succeeded,
-				skipped: progress.skipped,
-				failed: progress.failed + 1,
-				results: [
-					{
-						id: '',
-						filename_disk: '',
-						from: progress.from || '',
-						to: target.value,
-						status: 'failed',
-						error: 'Cancelled by user',
-					},
-				],
-				transferred_bytes: progress.transferredBytes,
-				total_bytes: progress.totalBytes,
-				elapsed_ms: progress.elapsedMs,
-			};
-		} else {
-			result.value = {
-				mode: mode.value,
-				target_storage: target.value,
-				total: progress.totalFiles,
-				succeeded: progress.succeeded,
-				skipped: progress.skipped,
-				failed: Math.max(1, progress.failed),
-				results: [
-					{
-						id: '',
-						filename_disk: '',
-						from: progress.from || '',
-						to: target.value,
-						status: 'failed',
-						error: err?.response?.data?.errors?.[0]?.message || err?.message || 'Migration failed',
-					},
-				],
-				transferred_bytes: progress.transferredBytes,
-				total_bytes: progress.totalBytes,
-				elapsed_ms: progress.elapsedMs,
-			};
-		}
+		await start(payload, {
+			estimatedCount: props.estimatedCount || props.fileIds?.length || 0,
+			estimatedBytes: props.estimatedBytes,
+			sourceStorage: props.sourceStorage,
+			listener: {
+				onDone: (r) => {
+					if (!ownsForegroundJob.value) return;
+					localResult.value = r;
+					emit('done', r);
+				},
+				onCancel: (r) => {
+					if (ownsForegroundJob.value) localResult.value = r;
+				},
+				onError: (err) => {
+					if (!ownsForegroundJob.value) return;
+					localResult.value = {
+						mode: mode.value,
+						target_storage: target.value!,
+						total: progress.totalFiles,
+						succeeded: progress.succeeded,
+						skipped: progress.skipped,
+						failed: Math.max(1, progress.failed),
+						results: [
+							{
+								id: '',
+								filename_disk: '',
+								from: progress.from || '',
+								to: target.value!,
+								status: 'failed',
+								error: err.message || 'Migration failed',
+							},
+						],
+						transferred_bytes: progress.transferredBytes,
+						total_bytes: progress.totalBytes,
+						elapsed_ms: progress.elapsedMs,
+					};
+				},
+			},
+		});
+	} catch {
+		// onError listener handles drawer UI
 	} finally {
-		running.value = false;
-		abortController = null;
+		ownsForegroundJob.value = false;
+		clearListeners();
 	}
 }
 </script>
@@ -420,6 +463,21 @@ async function submit() {
 	margin: 0;
 	font-size: 12px;
 	color: var(--theme--foreground-subdued);
+}
+
+.background-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+.background-actions .note {
+	flex: 1 1 100%;
+}
+
+.result .background-btn {
+	align-self: flex-start;
 }
 
 .result {

@@ -19,7 +19,7 @@ type UsableFolders = {
 	openFolders: Ref<string[]>;
 };
 
-const OPEN_FOLDERS_INITIAL = ['root'];
+const OPEN_FOLDERS_INITIAL: string[] = [];
 
 const loading = ref(false);
 const folders = ref<Folder[] | null>(null);
