@@ -9,7 +9,7 @@
 		<template #actions>
 			<v-button
 				v-if="selected.length"
-				v-tooltip.bottom="'Delete selected from disk'"
+				v-tooltip.bottom="'Delete Selected from Storage'"
 				icon
 				rounded
 				secondary
@@ -20,7 +20,7 @@
 				<v-icon name="delete" />
 			</v-button>
 			<v-button
-				v-tooltip.bottom="'Import all unknown files'"
+				v-tooltip.bottom="'Import All Unknown Files'"
 				icon
 				rounded
 				:disabled="!orphans.length || importing || scanning || deleting"
@@ -35,21 +35,21 @@
 			<p class="intro">
 				Finds files on <strong>{{ location }}</strong> that aren’t registered in Directus yet.
 				Import only creates database rows — nothing is copied. Titles come from the filename
-				(underscores become spaces). You can delete selected unknown files from disk.
+				(underscores become spaces). You can delete selected unknown files from storage.
 				Generated thumbnails are excluded.
 			</p>
 
 			<div class="toolbar">
 				<v-button secondary :loading="scanning" :disabled="deleting" @click="scan">
 					<v-icon name="radar" left />
-					Scan disk
+					Scan Storage
 				</v-button>
 				<v-button
 					:disabled="!orphans.length || importing || scanning || deleting"
 					:loading="importing"
 					@click="askConfirm"
 				>
-					Import {{ orphans.length || '' }} new file{{ orphans.length === 1 ? '' : 's' }}
+					Import {{ orphans.length || '' }} New File{{ orphans.length === 1 ? '' : 's' }}
 				</v-button>
 				<v-button
 					secondary
@@ -58,12 +58,12 @@
 					@click="askDeleteConfirm"
 				>
 					<v-icon name="delete" left />
-					Delete selected ({{ selected.length }})
+					Delete Selected ({{ selected.length }})
 				</v-button>
 			</div>
 
 			<p v-if="meta" class="meta">
-				Scanned {{ meta.scanned.toLocaleString() }} disk objects ·
+				Scanned {{ meta.scanned.toLocaleString() }} objects ·
 				{{ meta.known.toLocaleString() }} already in DB ·
 				{{ meta.orphan_count.toLocaleString() }} unknown
 			</p>
@@ -76,7 +76,7 @@
 			<p v-else-if="error" class="error">{{ error }}</p>
 
 			<p v-else-if="scannedOnce && !orphans.length" class="empty">
-				No unknown files on this storage. Everything on disk is already in the database.
+				No unknown files on this storage. Everything here is already in the database.
 			</p>
 
 			<div v-else-if="orphans.length" class="table-wrap">
@@ -87,7 +87,6 @@
 								<v-checkbox :model-value="allSelected" @update:model-value="toggleSelectAll" />
 							</th>
 							<th>filename_disk</th>
-							<th>Title (will be)</th>
 							<th>Type</th>
 							<th>Size</th>
 						</tr>
@@ -101,7 +100,6 @@
 								/>
 							</td>
 							<td class="name" :title="row.filename_disk">{{ row.filename_disk }}</td>
-							<td class="title-cell" :title="row.title">{{ row.title }}</td>
 							<td>{{ row.type || '—' }}</td>
 							<td>{{ formatBytes(row.filesize) }}</td>
 						</tr>
@@ -147,7 +145,7 @@
 		@esc="deleteConfirmOpen = false"
 	>
 		<v-card>
-			<v-card-title>Delete from disk?</v-card-title>
+			<v-card-title>Delete from Storage?</v-card-title>
 			<v-card-text>
 				Permanently delete
 				<strong>{{ selected.length.toLocaleString() }}</strong>
@@ -417,13 +415,6 @@ th {
 
 .check-col :deep(.v-checkbox) {
 	margin: 0;
-}
-
-.title-cell {
-	max-width: 240px;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
 }
 
 .result {
