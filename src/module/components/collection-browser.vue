@@ -322,7 +322,7 @@ function bindLayout(layoutState: Record<string, any>) {
 				<search-input v-model="search" v-model:filter="filter" collection="directus_files" />
 
 				<header-action-button
-					v-if="mode === 'storage'"
+					v-if="mode === 'storage' && !selection.length"
 					v-tooltip.bottom="`Detect Files on ${storage}`"
 					icon="radar"
 					secondary
@@ -406,6 +406,7 @@ function bindLayout(layoutState: Record<string, any>) {
 				<sidebar-detail id="actions" icon="swap_horiz" title="Actions">
 					<div class="sidebar-actions">
 						<v-button
+							v-if="!selection.length"
 							secondary
 							full-width
 							class="sidebar-btn"
@@ -415,7 +416,7 @@ function bindLayout(layoutState: Record<string, any>) {
 							{{ mode === 'storage' ? `Upload to ${storage}` : 'Upload Files' }}
 						</v-button>
 						<v-button
-							v-if="mode === 'storage'"
+							v-if="mode === 'storage' && !selection.length"
 							secondary
 							full-width
 							class="sidebar-btn"
