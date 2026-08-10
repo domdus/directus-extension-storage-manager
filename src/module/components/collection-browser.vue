@@ -339,7 +339,7 @@ function bindLayout(layoutState: Record<string, any>) {
 
 				<header-action-button
 					v-if="mode === 'storage'"
-					v-tooltip.bottom="'Migrate Files'"
+					v-tooltip.bottom="'Migrate All'"
 					icon="swap_horiz"
 					@click="openMigrate('storage')"
 				/>
@@ -438,7 +438,7 @@ function bindLayout(layoutState: Record<string, any>) {
 							class="sidebar-btn sidebar-btn-primary"
 							@click="openMigrate('storage')"
 						>
-							Migrate Files on {{ storage }}
+							Migrate All on {{ storage }}
 						</v-button>
 						<v-button
 							v-else
