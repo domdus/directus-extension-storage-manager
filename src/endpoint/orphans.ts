@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { diskExists, diskList, diskStat, getStorageManager } from './storage';
+import { diskDelete, diskExists, diskList, diskStat, getStorageManager } from './storage';
 import { getLocationDriver, getLocationRoot } from './usage';
 
 export type OrphanFile = {
@@ -243,6 +243,67 @@ export async function importOrphans(
 			});
 
 			results.push({ filename_disk: name, id, status: 'imported' });
+		} catch (error: any) {
+			results.push({
+				filename_disk: name,
+				status: 'failed',
+				error: error?.message || String(error),
+			});
+		}
+	}
+
+	return results;
+}
+
+export type DeleteOrphanResult = {
+	filename_disk: string;
+	status: 'deleted' | 'skipped' | 'failed';
+	error?: string;
+};
+
+export async function deleteOrphans(
+	database: any,
+	location: string,
+	filenameDisks: string[],
+): Promise<DeleteOrphanResult[]> {
+	const storage = await getStorageManager();
+	const disk = storage.location(location);
+	const results: DeleteOrphanResult[] = [];
+
+	for (const filename_disk of filenameDisks) {
+		const name = String(filename_disk || '').trim();
+		if (!name || isIgnoredDiskEntry(name)) {
+			results.push({
+				filename_disk: name,
+				status: 'skipped',
+				error: name && isAssetTransform(name) ? 'Generated thumbnail' : 'Ignored path',
+			});
+			continue;
+		}
+
+		try {
+			const existing = await database('directus_files')
+				.select('id')
+				.where({ storage: location, filename_disk: name })
+				.first();
+
+			if (existing) {
+				results.push({
+					filename_disk: name,
+					status: 'skipped',
+					error: 'Registered in Directus — use File Library to delete',
+				});
+				continue;
+			}
+
+			const exists = await diskExists(disk, name);
+			if (!exists) {
+				results.push({ filename_disk: name, status: 'skipped', error: 'Not found on disk' });
+				continue;
+			}
+
+			await diskDelete(disk, name);
+			results.push({ filename_disk: name, status: 'deleted' });
 		} catch (error: any) {
 			results.push({
 				filename_disk: name,

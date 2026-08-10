@@ -1,7 +1,7 @@
 import type { Request, Response, NextFunction, Router } from 'express';
 import { accountabilityIsAdmin } from '../shared/admin';
 import { migrateFiles } from './migrate';
-import { detectOrphans, importOrphans } from './orphans';
+import { detectOrphans, deleteOrphans, importOrphans } from './orphans';
 import {
 	buildStorageLocationInfo,
 	getLocationDriver,
@@ -251,6 +251,50 @@ export default {
 					data: {
 						total: results.length,
 						imported: results.filter((r) => r.status === 'imported').length,
+						skipped: results.filter((r) => r.status === 'skipped').length,
+						failed: results.filter((r) => r.status === 'failed').length,
+						results,
+					},
+				});
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** Permanently delete orphan disk objects (not in directus_files). Thumbnails are skipped. */
+		router.post('/storages/:location/delete-orphans', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+
+				const location = String(req.params.location);
+				const locations = listConfiguredLocations(env);
+				if (!locations.includes(location)) {
+					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+					return;
+				}
+
+				const body = (req.body || {}) as { filename_disks?: string[] };
+				const filenameDisks = Array.isArray(body.filename_disks)
+					? body.filename_disks.map(String).filter(Boolean)
+					: [];
+
+				if (filenameDisks.length === 0) {
+					res.status(400).json({
+						errors: [{ message: 'Provide filename_disks — at least one orphan to delete' }],
+					});
+					return;
+				}
+
+				const results = await deleteOrphans(database, location, filenameDisks);
+
+				logger.info(
+					`[storage-manager] delete-orphans location=${location} total=${results.length} deleted=${results.filter((r) => r.status === 'deleted').length}`,
+				);
+
+				res.json({
+					data: {
+						total: results.length,
+						deleted: results.filter((r) => r.status === 'deleted').length,
 						skipped: results.filter((r) => r.status === 'skipped').length,
 						failed: results.filter((r) => r.status === 'failed').length,
 						results,

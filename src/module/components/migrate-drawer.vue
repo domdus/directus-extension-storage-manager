@@ -37,7 +37,7 @@
 
 			<template v-if="!running && !result">
 				<div class="field">
-					<label>Target storage</label>
+					<label>Target Storage</label>
 					<v-select
 						v-model="target"
 						:items="targetChoices"

@@ -8,10 +8,22 @@
 	>
 		<template #actions>
 			<v-button
+				v-if="selected.length"
+				v-tooltip.bottom="'Delete selected from disk'"
+				icon
+				rounded
+				secondary
+				:disabled="deleting || scanning"
+				:loading="deleting"
+				@click="askDeleteConfirm"
+			>
+				<v-icon name="delete" />
+			</v-button>
+			<v-button
 				v-tooltip.bottom="'Import all unknown files'"
 				icon
 				rounded
-				:disabled="!orphans.length || importing || scanning"
+				:disabled="!orphans.length || importing || scanning || deleting"
 				:loading="importing"
 				@click="askConfirm"
 			>
@@ -21,26 +33,32 @@
 
 		<div class="body">
 			<p class="intro">
-				Scans storage <strong>{{ location }}</strong> for objects on disk that are not in
-				<code>directus_files</code> (by <code>filename_disk</code>). Import keeps the exact
-				<code>filename_disk</code> and sets <code>title</code> from the name with
-				<code>_</code> → spaces. Files are not copied — only DB rows are created.
-				Generated Directus image transforms/thumbnails are excluded automatically (filenames ending in
-				<code>__{hash}</code> or <code>__{hash}.ext</code>, from
-				<code>AssetsService</code> / <code>getAssetSuffix</code>).
+				Finds files on <strong>{{ location }}</strong> that aren’t registered in Directus yet.
+				Import only creates database rows — nothing is copied. Titles come from the filename
+				(underscores become spaces). You can delete selected unknown files from disk.
+				Generated thumbnails are excluded.
 			</p>
 
 			<div class="toolbar">
-				<v-button secondary :loading="scanning" @click="scan">
+				<v-button secondary :loading="scanning" :disabled="deleting" @click="scan">
 					<v-icon name="radar" left />
 					Scan disk
 				</v-button>
 				<v-button
-					:disabled="!orphans.length || importing || scanning"
+					:disabled="!orphans.length || importing || scanning || deleting"
 					:loading="importing"
 					@click="askConfirm"
 				>
 					Import {{ orphans.length || '' }} new file{{ orphans.length === 1 ? '' : 's' }}
+				</v-button>
+				<v-button
+					secondary
+					:disabled="!selected.length || importing || scanning || deleting"
+					:loading="deleting"
+					@click="askDeleteConfirm"
+				>
+					<v-icon name="delete" left />
+					Delete selected ({{ selected.length }})
 				</v-button>
 			</div>
 
@@ -65,6 +83,9 @@
 				<table>
 					<thead>
 						<tr>
+							<th class="check-col">
+								<v-checkbox :model-value="allSelected" @update:model-value="toggleSelectAll" />
+							</th>
 							<th>filename_disk</th>
 							<th>Title (will be)</th>
 							<th>Type</th>
@@ -73,6 +94,12 @@
 					</thead>
 					<tbody>
 						<tr v-for="row in orphans" :key="row.filename_disk">
+							<td class="check-col">
+								<v-checkbox
+									:model-value="selected.includes(row.filename_disk)"
+									@update:model-value="(checked) => toggleRow(row.filename_disk, checked)"
+								/>
+							</td>
 							<td class="name" :title="row.filename_disk">{{ row.filename_disk }}</td>
 							<td class="title-cell" :title="row.title">{{ row.title }}</td>
 							<td>{{ row.type || '—' }}</td>
@@ -80,6 +107,11 @@
 						</tr>
 					</tbody>
 				</table>
+			</div>
+
+			<div v-if="lastDeleteResult" class="result" :class="lastDeleteResult.failed ? 'has-fail' : 'ok'">
+				Deleted {{ lastDeleteResult.deleted }} · skipped {{ lastDeleteResult.skipped }} · failed
+				{{ lastDeleteResult.failed }}
 			</div>
 
 			<div v-if="lastResult" class="result" :class="lastResult.failed ? 'has-fail' : 'ok'">
@@ -108,10 +140,34 @@
 			</v-card-actions>
 		</v-card>
 	</v-dialog>
+
+	<v-dialog
+		:model-value="deleteConfirmOpen"
+		@update:model-value="deleteConfirmOpen = $event"
+		@esc="deleteConfirmOpen = false"
+	>
+		<v-card>
+			<v-card-title>Delete from disk?</v-card-title>
+			<v-card-text>
+				Permanently delete
+				<strong>{{ selected.length.toLocaleString() }}</strong>
+				file{{ selected.length === 1 ? '' : 's' }} from storage
+				<strong>{{ location }}</strong>?
+				<br /><br />
+				Only unregistered files are removed. Generated thumbnails are not deleted.
+			</v-card-text>
+			<v-card-actions>
+				<v-button secondary :disabled="deleting" @click="deleteConfirmOpen = false">Cancel</v-button>
+				<v-button kind="danger" :loading="deleting" @click="confirmDelete">
+					Delete {{ selected.length.toLocaleString() }}
+				</v-button>
+			</v-card-actions>
+		</v-card>
+	</v-dialog>
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useApi } from '@directus/extensions-sdk';
 import { formatBytes } from '../../shared/format';
 
@@ -138,20 +194,30 @@ const api = useApi();
 
 const scanning = ref(false);
 const importing = ref(false);
+const deleting = ref(false);
 const confirmOpen = ref(false);
+const deleteConfirmOpen = ref(false);
 const scannedOnce = ref(false);
 const error = ref<string | null>(null);
 const orphans = ref<OrphanRow[]>([]);
+const selected = ref<string[]>([]);
 const meta = ref<{ scanned: number; known: number; orphan_count: number } | null>(null);
 const lastResult = ref<{ imported: number; skipped: number; failed: number } | null>(null);
+const lastDeleteResult = ref<{ deleted: number; skipped: number; failed: number } | null>(null);
+
+const allSelected = computed(
+	() => orphans.value.length > 0 && selected.value.length === orphans.value.length,
+);
 
 watch(
 	() => props.modelValue,
 	(open) => {
 		if (open) {
 			lastResult.value = null;
+			lastDeleteResult.value = null;
 			error.value = null;
 			confirmOpen.value = false;
+			deleteConfirmOpen.value = false;
 			scan();
 		}
 	},
@@ -159,12 +225,32 @@ watch(
 
 function close() {
 	confirmOpen.value = false;
+	deleteConfirmOpen.value = false;
 	emit('update:modelValue', false);
 }
 
+function toggleSelectAll(checked: boolean) {
+	selected.value = checked ? orphans.value.map((o) => o.filename_disk) : [];
+}
+
+function toggleRow(filename_disk: string, checked: boolean) {
+	if (checked) {
+		if (!selected.value.includes(filename_disk)) {
+			selected.value = [...selected.value, filename_disk];
+		}
+	} else {
+		selected.value = selected.value.filter((name) => name !== filename_disk);
+	}
+}
+
 function askConfirm() {
-	if (!orphans.value.length || importing.value) return;
+	if (!orphans.value.length || importing.value || deleting.value) return;
 	confirmOpen.value = true;
+}
+
+function askDeleteConfirm() {
+	if (!selected.value.length || importing.value || deleting.value) return;
+	deleteConfirmOpen.value = true;
 }
 
 async function scan() {
@@ -176,6 +262,7 @@ async function scan() {
 		orphans.value = (res.data?.data || []) as OrphanRow[];
 		meta.value = res.data?.meta || null;
 		scannedOnce.value = true;
+		selected.value = [];
 	} catch (e: any) {
 		error.value = e?.response?.data?.errors?.[0]?.message || e?.message || String(e);
 		orphans.value = [];
@@ -208,6 +295,34 @@ async function confirmImport() {
 		confirmOpen.value = false;
 	} finally {
 		importing.value = false;
+	}
+}
+
+async function confirmDelete() {
+	if (!selected.value.length) return;
+	deleting.value = true;
+	error.value = null;
+	const toDelete = [...selected.value];
+	try {
+		const res = await api.post(
+			`/storage-manager/storages/${encodeURIComponent(props.location)}/delete-orphans`,
+			{ filename_disks: toDelete },
+		);
+		const data = res.data?.data;
+		lastDeleteResult.value = {
+			deleted: Number(data?.deleted || 0),
+			skipped: Number(data?.skipped || 0),
+			failed: Number(data?.failed || 0),
+		};
+		lastResult.value = null;
+		deleteConfirmOpen.value = false;
+		emit('imported');
+		await scan();
+	} catch (e: any) {
+		error.value = e?.response?.data?.errors?.[0]?.message || e?.message || String(e);
+		deleteConfirmOpen.value = false;
+	} finally {
+		deleting.value = false;
 	}
 }
 </script>
@@ -291,6 +406,17 @@ th {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+}
+
+.check-col {
+	width: 36px;
+	padding-left: 8px;
+	padding-right: 4px;
+	vertical-align: middle;
+}
+
+.check-col :deep(.v-checkbox) {
+	margin: 0;
 }
 
 .title-cell {
