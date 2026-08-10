@@ -339,7 +339,7 @@ function bindLayout(layoutState: Record<string, any>) {
 
 				<header-action-button
 					v-if="mode === 'storage'"
-					v-tooltip.bottom="'Migrate All'"
+					v-tooltip.bottom="'Migrate Files'"
 					icon="swap_horiz"
 					@click="openMigrate('storage')"
 				/>
@@ -412,7 +412,7 @@ function bindLayout(layoutState: Record<string, any>) {
 							:loading="uploading"
 							@click="openFilePicker"
 						>
-							{{ mode === 'storage' ? `Upload to ${storage}` : 'Upload files' }}
+							{{ mode === 'storage' ? `Upload to ${storage}` : 'Upload Files' }}
 						</v-button>
 						<v-button
 							v-if="mode === 'storage'"
@@ -421,7 +421,7 @@ function bindLayout(layoutState: Record<string, any>) {
 							class="sidebar-btn"
 							@click="openDetect"
 						>
-							Detect files on {{ storage }}
+							Detect Files on {{ storage }}
 						</v-button>
 						<v-button
 							v-if="selection.length"
@@ -430,7 +430,7 @@ function bindLayout(layoutState: Record<string, any>) {
 							class="sidebar-btn"
 							@click="openMigrate('files')"
 						>
-							Migrate selected ({{ selection.length }})
+							Migrate Selected ({{ selection.length }})
 						</v-button>
 						<v-button
 							v-if="mode === 'storage'"
@@ -438,7 +438,7 @@ function bindLayout(layoutState: Record<string, any>) {
 							class="sidebar-btn sidebar-btn-primary"
 							@click="openMigrate('storage')"
 						>
-							Migrate all on {{ storage }}
+							Migrate Files on {{ storage }}
 						</v-button>
 						<v-button
 							v-else
@@ -446,7 +446,7 @@ function bindLayout(layoutState: Record<string, any>) {
 							class="sidebar-btn sidebar-btn-primary"
 							@click="openMigrate('folder')"
 						>
-							{{ folder ? 'Migrate this folder' : 'Migrate root files' }}
+							{{ folder ? 'Migrate This Folder' : 'Migrate Root Files' }}
 						</v-button>
 					</div>
 				</sidebar-detail>

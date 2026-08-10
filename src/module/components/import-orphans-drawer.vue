@@ -1,7 +1,7 @@
 <template>
 	<v-drawer
 		:model-value="modelValue"
-		:title="`Detect files on ${location}`"
+		:title="`Detect Files on ${location}`"
 		icon="folder_off"
 		@update:model-value="$emit('update:modelValue', $event)"
 		@cancel="close"
