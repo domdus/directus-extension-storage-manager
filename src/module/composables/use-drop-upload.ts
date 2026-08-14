@@ -4,6 +4,8 @@ import { computed, onMounted, onUnmounted, ref, unref, type MaybeRef } from 'vue
 export type UploadPreset = {
 	storage?: string;
 	folder?: string | null;
+	/** Physical storage path to place uploads under (storage mode). */
+	storagePath?: string | null;
 };
 
 type UploadOptions = {
@@ -119,12 +121,21 @@ export function useDropUpload(options: UploadOptions) {
 
 		formData.append('file', file);
 
-		await api.post('/files', formData, {
+		const res = await api.post('/files', formData, {
 			onUploadProgress: (event: { loaded: number; total?: number }) => {
 				if (!event.total) return;
 				onProgress(Math.floor((event.loaded * 100) / event.total));
 			},
 		});
+
+		const fileId = res?.data?.data?.id;
+		const storagePath = preset.storagePath ? String(preset.storagePath).replace(/^\/+|\/+$/g, '') : '';
+		if (fileId && preset.storage && storagePath) {
+			await api.post(`/storage-manager/storages/${encodeURIComponent(preset.storage)}/place-file`, {
+				file_id: fileId,
+				target_path: storagePath,
+			});
+		}
 	}
 
 	async function uploadFiles(files: globalThis.File[]) {

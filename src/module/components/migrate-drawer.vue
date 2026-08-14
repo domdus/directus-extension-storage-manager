@@ -60,7 +60,7 @@
 					</p>
 				</div>
 
-				<div v-if="selectionKind === 'folder'" class="field">
+				<div v-if="(selectionKind === 'folder' && folderId) || selectionKind === 'storage_path'" class="field">
 					<v-checkbox v-model="recursive" label="Include files in subfolders" />
 				</div>
 			</template>
@@ -133,9 +133,10 @@ const props = defineProps<{
 	modelValue: boolean;
 	storages: StorageLocationInfo[];
 	sourceStorage?: string | null;
-	selectionKind: 'files' | 'storage' | 'folder';
+	selectionKind: 'files' | 'storage' | 'folder' | 'storage_path';
 	fileIds?: string[];
 	folderId?: string | null;
+	sourcePath?: string | null;
 	estimatedCount?: number;
 	estimatedBytes?: number;
 }>();
@@ -295,10 +296,29 @@ const summaryText = computed(() => {
 			? `Migrated ${count.toLocaleString()} files${bytes} from “${props.sourceStorage}”.`
 			: `Migrate all ${count.toLocaleString()} files${bytes} on “${props.sourceStorage}”.`;
 	}
-	if (props.selectionKind === 'folder') {
+	if (props.selectionKind === 'storage_path') {
+		const pathLabel = props.sourcePath || 'this folder';
 		return done
-			? `Migrated ${count.toLocaleString()} files${bytes} from the selected folder.`
-			: `Migrate ${count.toLocaleString()} files${bytes} in the selected folder.`;
+			? `Migrated ${count.toLocaleString()} files${bytes} from “${pathLabel}”.`
+			: props.estimatedCount == null
+				? `Migrate all files in “${pathLabel}”${bytes}.`
+				: `Migrate ${count.toLocaleString()} files${bytes} in “${pathLabel}”.`;
+	}
+	if (props.selectionKind === 'folder') {
+		const scope = props.folderId
+			? 'in this folder'
+			: 'at the root (files with no virtual folder)';
+		if (done) {
+			return props.folderId
+				? `Migrated ${count.toLocaleString()} files${bytes} from this folder.`
+				: `Migrated ${count.toLocaleString()} root files${bytes}.`;
+		}
+		if (props.estimatedCount == null) {
+			return props.folderId
+				? `Migrate all files ${scope}${bytes}.`
+				: `Migrate all root files${bytes} (files with no virtual folder).`;
+		}
+		return `Migrate ${count.toLocaleString()} files${bytes} ${scope}.`;
 	}
 	return done
 		? `Migrated ${count.toLocaleString()} selected file(s)${bytes}.`
@@ -362,6 +382,7 @@ async function submit() {
 		concurrency: 1 as number,
 		file_ids: undefined as string[] | undefined,
 		source_storage: undefined as string | undefined,
+		source_path: undefined as string | undefined,
 		folder_id: undefined as string | null | undefined,
 		recursive: undefined as boolean | undefined,
 	};
@@ -370,6 +391,10 @@ async function submit() {
 		payload.file_ids = props.fileIds || [];
 	} else if (props.selectionKind === 'storage') {
 		payload.source_storage = props.sourceStorage || undefined;
+	} else if (props.selectionKind === 'storage_path') {
+		payload.source_storage = props.sourceStorage || undefined;
+		payload.source_path = props.sourcePath || undefined;
+		payload.recursive = recursive.value;
 	} else if (props.selectionKind === 'folder') {
 		payload.folder_id = props.folderId ?? null;
 		payload.recursive = recursive.value;

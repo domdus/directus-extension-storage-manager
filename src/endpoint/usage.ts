@@ -142,5 +142,6 @@ export async function buildStorageLocationInfo(
 		icon: meta.icon,
 		root: getLocationRoot(env, location),
 		bucket: getLocationBucket(env, location),
+		folder_count: 0,
 	};
 }

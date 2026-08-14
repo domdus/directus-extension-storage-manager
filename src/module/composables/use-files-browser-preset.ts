@@ -38,6 +38,10 @@ function loadStored(): Partial<{
 /**
  * Lightweight stand-in for Directus `usePreset('directus_files')`.
  * Persists layout / options / query locally so we don't depend on app-internal presets.
+ *
+ * Pagination + page size UI live inside host `layout-cards` / `layout-tabular`
+ * (VPagination + per-page select: 25/50/100/250/500/1000). We only own `page`/`limit`
+ * in layoutQuery — same contract as File Library.
  */
 export function useFilesBrowserPreset() {
 	const stored = loadStored();
@@ -50,6 +54,9 @@ export function useFilesBrowserPreset() {
 	const layoutQuery = ref({
 		...systemDefaults.layoutQuery,
 		...(stored.layoutQuery || {}),
+		// Always keep File Library pagination keys (layouts read these via useLayout).
+		page: Math.max(1, Number(stored.layoutQuery?.page) || 1),
+		limit: normalizeLimit(stored.layoutQuery?.limit),
 	}) as Ref<LayoutQuery>;
 	const filter = ref<Record<string, unknown> | null>(null);
 	const search = ref<string | null>(null);
@@ -63,7 +70,11 @@ export function useFilesBrowserPreset() {
 					JSON.stringify({
 						layout: layout.value,
 						layoutOptions: layoutOptions.value,
-						layoutQuery: layoutQuery.value,
+						layoutQuery: {
+							...layoutQuery.value,
+							page: Math.max(1, Number(layoutQuery.value.page) || 1),
+							limit: normalizeLimit(layoutQuery.value.limit),
+						},
 					}),
 				);
 			} catch {
@@ -81,6 +92,12 @@ export function useFilesBrowserPreset() {
 		search.value = null;
 	}
 
+	function resetPage() {
+		if (Number(layoutQuery.value.page) !== 1) {
+			layoutQuery.value = { ...layoutQuery.value, page: 1 };
+		}
+	}
+
 	return {
 		layout,
 		layoutOptions,
@@ -88,5 +105,15 @@ export function useFilesBrowserPreset() {
 		filter,
 		search,
 		resetPreset,
+		resetPage,
 	};
+}
+
+/** Same page-size options as Directus layout-cards / layout-tabular. */
+const PAGE_SIZES = [25, 50, 100, 250, 500, 1000] as const;
+
+function normalizeLimit(raw: unknown): number {
+	const n = Number(raw);
+	if (PAGE_SIZES.includes(n as (typeof PAGE_SIZES)[number])) return n;
+	return 25;
 }

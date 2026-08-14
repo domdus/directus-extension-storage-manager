@@ -1,0 +1,874 @@
+import { Readable } from 'node:stream';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import {
+	diskDelete,
+	diskDeleteWithAssets,
+	diskExists,
+	diskList,
+	diskListColocatedAssets,
+	diskRead,
+	diskWrite,
+	getStorageManager,
+} from './storage';
+import { getLocationDriver, getLocationRoot } from './usage';
+import { STORAGE_FOLDER_KEEP, type StorageBrowseFolder, type StorageFolderNode } from '../shared/types';
+
+export function normalizeStoragePath(raw: string | null | undefined): string {
+	return String(raw || '')
+		.replace(/\\/g, '/')
+		.replace(/^\/+|\/+$/g, '')
+		.replace(/\/+/g, '/');
+}
+
+export function joinStoragePath(...parts: Array<string | null | undefined>): string {
+	return parts
+		.map((p) => normalizeStoragePath(p))
+		.filter(Boolean)
+		.join('/');
+}
+
+export function isKeepMarker(filename: string): boolean {
+	return path.basename(filename) === STORAGE_FOLDER_KEEP;
+}
+
+function escapeRegex(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Immediate-child file filter for Directus items query (non-recursive). */
+export function getStoragePathFileRegex(storagePath: string): string {
+	const base = normalizeStoragePath(storagePath);
+	if (!base) return `^[^/]+$`;
+	return `^${escapeRegex(base)}/[^/]+$`;
+}
+
+function resolveLocalAbsolute(root: string, relPath: string): string {
+	const cwd = process.env.PWD || process.cwd() || '/directus';
+	const absoluteRoot = path.isAbsolute(root) ? root : path.join(cwd, root);
+	const abs = path.resolve(absoluteRoot, relPath);
+	if (!abs.startsWith(path.resolve(absoluteRoot))) {
+		throw new Error('Invalid storage path');
+	}
+	return abs;
+}
+
+function validateFolderName(name: string): string {
+	const trimmed = String(name || '').trim();
+	if (!trimmed) throw new Error('Folder name is required');
+	if (trimmed.includes('/') || trimmed.includes('\\')) {
+		throw new Error('Folder name cannot contain slashes');
+	}
+	if (trimmed === '.' || trimmed === '..' || trimmed === STORAGE_FOLDER_KEEP) {
+		throw new Error('Invalid folder name');
+	}
+	return trimmed;
+}
+
+async function collectImmediateFoldersFromDisk(
+	location: string,
+	parentPath: string,
+	env: Record<string, unknown>,
+): Promise<Set<string>> {
+	const folders = new Set<string>();
+	const driver = getLocationDriver(env, location);
+	const root = getLocationRoot(env, location);
+	const parent = normalizeStoragePath(parentPath);
+
+	if (driver === 'local' && root) {
+		const abs = resolveLocalAbsolute(root, parent || '.');
+		try {
+			const entries = await fs.readdir(abs, { withFileTypes: true });
+			for (const entry of entries) {
+				if (entry.isDirectory() && entry.name && !entry.name.startsWith('.')) {
+					folders.add(entry.name);
+				}
+			}
+		} catch {
+			// missing dir is fine
+		}
+		return folders;
+	}
+
+	try {
+		const storage = await getStorageManager();
+		const disk = storage.location(location);
+		const prefix = parent ? `${parent}/` : '';
+		for await (const filepath of diskList(disk, prefix)) {
+			const name = String(filepath || '').replace(/^[/\\]+/, '');
+			if (!name.startsWith(prefix) && prefix) continue;
+			const rest = prefix ? name.slice(prefix.length) : name;
+			const segment = rest.split('/')[0];
+			if (!segment || segment.startsWith('.')) continue;
+			if (rest.includes('/')) folders.add(segment);
+			else if (isKeepMarker(name)) {
+				// `.keep` itself is a file under the folder — the parent of keep is the folder;
+				// when listing with prefix = parent, keep appears as `${parent}/.keep` so segment is `.keep` (skipped).
+			}
+		}
+	} catch {
+		// list unsupported — rely on DB only
+	}
+
+	return folders;
+}
+
+async function collectImmediateFoldersFromDb(
+	database: any,
+	location: string,
+	parentPath: string,
+): Promise<Set<string>> {
+	const folders = new Set<string>();
+	const parent = normalizeStoragePath(parentPath);
+	const rows = await database('directus_files').select('filename_disk').where('storage', location);
+	const prefix = parent ? `${parent}/` : '';
+
+	for (const row of rows) {
+		const name = String(row.filename_disk || '').replace(/^[/\\]+/, '');
+		if (!name) continue;
+		if (prefix && !name.startsWith(prefix)) continue;
+		const rest = prefix ? name.slice(prefix.length) : name;
+		const slash = rest.indexOf('/');
+		if (slash <= 0) continue;
+		const segment = rest.slice(0, slash);
+		if (!segment || segment.startsWith('.')) continue;
+		folders.add(segment);
+	}
+
+	return folders;
+}
+
+/** Also pick up empty cloud folders that only contain `.keep`. */
+async function collectKeepFoldersFromDisk(
+	location: string,
+	parentPath: string,
+	env: Record<string, unknown>,
+): Promise<Set<string>> {
+	const folders = new Set<string>();
+	const driver = getLocationDriver(env, location);
+	if (driver === 'local') return folders;
+
+	const parent = normalizeStoragePath(parentPath);
+	const prefix = parent ? `${parent}/` : '';
+
+	try {
+		const storage = await getStorageManager();
+		const disk = storage.location(location);
+		for await (const filepath of diskList(disk, prefix)) {
+			const name = String(filepath || '').replace(/^[/\\]+/, '');
+			if (!isKeepMarker(name)) continue;
+			const dir = normalizeStoragePath(path.posix.dirname(name));
+			if (parent) {
+				if (dir === parent) {
+					// keep is directly in parent — that marks `parent` itself, not a child
+					continue;
+				}
+				if (!dir.startsWith(`${parent}/`)) continue;
+				const rest = dir.slice(parent.length + 1);
+				const segment = rest.split('/')[0];
+				if (segment && !segment.startsWith('.')) folders.add(segment);
+			} else {
+				// root-level keep at `foo/.keep` → folder foo
+				const parts = dir.split('/').filter(Boolean);
+				if (parts.length === 1) folders.add(parts[0]!);
+			}
+		}
+	} catch {
+		// ignore
+	}
+
+	return folders;
+}
+
+export async function browseStorageFolders(
+	database: any,
+	location: string,
+	parentPath: string,
+	env: Record<string, unknown>,
+): Promise<{ path: string; folders: StorageBrowseFolder[] }> {
+	const parent = normalizeStoragePath(parentPath);
+	const names = new Set<string>();
+
+	for (const name of await collectImmediateFoldersFromDb(database, location, parent)) names.add(name);
+	for (const name of await collectImmediateFoldersFromDisk(location, parent, env)) names.add(name);
+	for (const name of await collectKeepFoldersFromDisk(location, parent, env)) names.add(name);
+
+	const folders = Array.from(names)
+		.sort((a, b) => a.localeCompare(b))
+		.map((name) => ({
+			name,
+			path: joinStoragePath(parent, name),
+		}));
+
+	return { path: parent, folders };
+}
+
+function addPathPrefixes(paths: Set<string>, fullPath: string) {
+	const parts = normalizeStoragePath(fullPath).split('/').filter(Boolean);
+	for (let i = 1; i <= parts.length; i++) {
+		paths.add(parts.slice(0, i).join('/'));
+	}
+}
+
+async function collectAllFolderPathsFromDb(database: any, location: string): Promise<Set<string>> {
+	const paths = new Set<string>();
+	const rows = await database('directus_files').select('filename_disk').where('storage', location);
+
+	for (const row of rows) {
+		const name = String(row.filename_disk || '').replace(/^[/\\]+/, '');
+		if (!name || isKeepMarker(name)) continue;
+		const dir = normalizeStoragePath(path.posix.dirname(name));
+		if (!dir || dir === '.') continue;
+		addPathPrefixes(paths, dir);
+	}
+
+	return paths;
+}
+
+async function collectAllFolderPathsFromLocalDisk(
+	location: string,
+	env: Record<string, unknown>,
+): Promise<Set<string>> {
+	const paths = new Set<string>();
+	const driver = getLocationDriver(env, location);
+	const root = getLocationRoot(env, location);
+	if (driver !== 'local' || !root) return paths;
+
+	async function walk(rel: string) {
+		const abs = resolveLocalAbsolute(root!, rel || '.');
+		let entries;
+		try {
+			entries = await fs.readdir(abs, { withFileTypes: true });
+		} catch {
+			return;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory() || !entry.name || entry.name.startsWith('.')) continue;
+			const childRel = joinStoragePath(rel, entry.name);
+			paths.add(childRel);
+			await walk(childRel);
+		}
+	}
+
+	await walk('');
+	return paths;
+}
+
+async function collectAllKeepFolderPaths(
+	location: string,
+	env: Record<string, unknown>,
+): Promise<Set<string>> {
+	const paths = new Set<string>();
+	const driver = getLocationDriver(env, location);
+	if (driver === 'local') return paths;
+
+	try {
+		const storage = await getStorageManager();
+		const disk = storage.location(location);
+		for await (const filepath of diskList(disk, '')) {
+			const name = String(filepath || '').replace(/^[/\\]+/, '');
+			if (!isKeepMarker(name)) continue;
+			const dir = normalizeStoragePath(path.posix.dirname(name));
+			if (!dir || dir === '.') continue;
+			addPathPrefixes(paths, dir);
+		}
+	} catch {
+		// ignore
+	}
+
+	return paths;
+}
+
+export function nestStorageFolderPaths(paths: string[]): StorageFolderNode[] {
+	const unique = Array.from(new Set(paths.map((p) => normalizeStoragePath(p)).filter(Boolean))).sort((a, b) =>
+		a.localeCompare(b),
+	);
+
+	const byPath = new Map<string, StorageFolderNode>();
+	for (const p of unique) {
+		const name = p.includes('/') ? p.slice(p.lastIndexOf('/') + 1) : p;
+		byPath.set(p, { name, path: p });
+	}
+
+	const roots: StorageFolderNode[] = [];
+	for (const p of unique) {
+		const node = byPath.get(p)!;
+		const parentPath = p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '';
+		if (parentPath && byPath.has(parentPath)) {
+			const parent = byPath.get(parentPath)!;
+			if (!parent.children) parent.children = [];
+			parent.children.push(node);
+		} else {
+			roots.push(node);
+		}
+	}
+
+	const sortChildren = (nodes: StorageFolderNode[]) => {
+		nodes.sort((a, b) => a.name.localeCompare(b.name));
+		for (const n of nodes) {
+			if (n.children?.length) sortChildren(n.children);
+		}
+	};
+	sortChildren(roots);
+	return roots;
+}
+
+/** Full nested folder tree for left-nav (File Library folders parity). */
+export async function browseStorageFolderTree(
+	database: any,
+	location: string,
+	env: Record<string, unknown>,
+): Promise<StorageFolderNode[]> {
+	const paths = new Set<string>();
+	for (const p of await collectAllFolderPathsFromDb(database, location)) paths.add(p);
+	for (const p of await collectAllFolderPathsFromLocalDisk(location, env)) paths.add(p);
+	for (const p of await collectAllKeepFolderPaths(location, env)) paths.add(p);
+	return nestStorageFolderPaths(Array.from(paths));
+}
+
+export function countFolderNodes(nodes: StorageFolderNode[]): number {
+	let total = 0;
+	for (const node of nodes) {
+		total += 1;
+		if (node.children?.length) total += countFolderNodes(node.children);
+	}
+	return total;
+}
+
+export async function countStorageFolders(
+	database: any,
+	location: string,
+	env: Record<string, unknown>,
+): Promise<number> {
+	try {
+		const tree = await browseStorageFolderTree(database, location, env);
+		return countFolderNodes(tree);
+	} catch {
+		return 0;
+	}
+}
+
+export async function createStorageFolder(
+	location: string,
+	name: string,
+	parentPath: string,
+	env: Record<string, unknown>,
+): Promise<{ path: string }> {
+	const folderName = validateFolderName(name);
+	const fullPath = joinStoragePath(parentPath, folderName);
+	const driver = getLocationDriver(env, location);
+
+	if (driver === 'local') {
+		const root = getLocationRoot(env, location);
+		if (!root) throw new Error(`Local storage “${location}” has no STORAGE_${location.toUpperCase()}_ROOT`);
+		const abs = resolveLocalAbsolute(root, fullPath);
+		await fs.mkdir(abs, { recursive: true });
+		return { path: fullPath };
+	}
+
+	const storage = await getStorageManager();
+	const disk = storage.location(location);
+	const keepKey = `${fullPath}/${STORAGE_FOLDER_KEEP}`;
+	if (!(await diskExists(disk, keepKey))) {
+		const empty = Readable.from([Buffer.alloc(0)]);
+		await diskWrite(disk, keepKey, empty, 'application/octet-stream');
+	}
+	return { path: fullPath };
+}
+
+/**
+ * Delete storage folders (File Library–style).
+ * - mode `move` (default): relocate registered files under the prefix up to the parent, then remove the folder.
+ * - mode `delete`: permanently delete registered files under the prefix (DB + storage), then remove the folder.
+ * Unregistered disk objects are not relocated — local dirs are force-removed; cloud leftovers are left alone
+ * (only `.keep` markers under the prefix are cleaned up).
+ */
+export async function deleteStorageFolders(
+	database: any,
+	location: string,
+	paths: string[],
+	env: Record<string, unknown>,
+	logger?: { info: (m: string) => void; warn: (m: string) => void },
+	options?: {
+		mode?: 'move' | 'delete';
+		/** Prefer FilesService.deleteMany when available (handles transforms). */
+		filesService?: { deleteMany: (keys: string[]) => Promise<unknown> };
+	},
+): Promise<{
+	deleted: string[];
+	skipped: Array<{ path: string; error: string }>;
+	relocated: number;
+	files_deleted: number;
+}> {
+	const mode = options?.mode === 'delete' ? 'delete' : 'move';
+	const deleted: string[] = [];
+	const skipped: Array<{ path: string; error: string }> = [];
+	let relocated = 0;
+	let filesDeleted = 0;
+	const driver = getLocationDriver(env, location);
+	const storage = await getStorageManager();
+	const disk = storage.location(location);
+
+	for (const raw of paths) {
+		const folderPath = normalizeStoragePath(raw);
+		if (!folderPath) {
+			skipped.push({ path: String(raw), error: 'Invalid path' });
+			continue;
+		}
+
+		const parent = parentStoragePath(folderPath);
+
+		try {
+			let deletedInFolder = 0;
+			if (mode === 'delete') {
+				const rows = await database('directus_files')
+					.select('id', 'filename_disk')
+					.where('storage', location)
+					.whereRaw('filename_disk LIKE ?', [`${folderPath}/%`]);
+
+				const realRows = rows.filter((r: any) => !isKeepMarker(String(r.filename_disk || '')));
+				const ids = realRows.map((r: any) => String(r.id));
+
+				if (ids.length) {
+					if (options?.filesService) {
+						await options.filesService.deleteMany(ids);
+					} else {
+						for (const row of realRows) {
+							const id = String(row.id);
+							const from = String(row.filename_disk || '');
+							try {
+								if (from) await diskDeleteWithAssets(disk, from);
+							} catch {
+								// best-effort disk cleanup
+							}
+							await database('directus_files').where('id', id).delete();
+						}
+					}
+					deletedInFolder = ids.length;
+					filesDeleted += ids.length;
+				}
+			} else {
+				const { moved, failed } = await relocateFilesWithPrefixChange(
+					database,
+					location,
+					folderPath,
+					parent,
+					logger,
+				);
+				relocated += moved;
+				if (failed > 0) {
+					skipped.push({
+						path: folderPath,
+						error: `Could not move ${failed} registered file(s) to parent`,
+					});
+					continue;
+				}
+			}
+
+			if (driver === 'local') {
+				const root = getLocationRoot(env, location);
+				if (!root) throw new Error('Missing local root');
+				const abs = resolveLocalAbsolute(root, folderPath);
+				await fs.rm(abs, { recursive: true, force: true });
+			} else {
+				// Drop keep markers that held the folder in the tree; leave unknown objects.
+				try {
+					for await (const filepath of diskList(disk, `${folderPath}/`)) {
+						const name = String(filepath || '').replace(/^[/\\]+/, '');
+						if (!name.startsWith(`${folderPath}/`)) continue;
+						if (!isKeepMarker(name)) continue;
+						try {
+							await diskDelete(disk, name);
+						} catch {
+							// best-effort
+						}
+					}
+				} catch {
+					const keepKey = `${folderPath}/${STORAGE_FOLDER_KEEP}`;
+					if (await diskExists(disk, keepKey)) {
+						await diskDelete(disk, keepKey);
+					}
+				}
+			}
+
+			deleted.push(folderPath);
+			logger?.info(
+				mode === 'delete'
+					? `[storage-manager] Deleted storage folder “${folderPath}” on ${location} (deleted ${deletedInFolder} registered file(s))`
+					: `[storage-manager] Deleted storage folder “${folderPath}” on ${location} (relocated files to parent)`,
+			);
+		} catch (err: any) {
+			skipped.push({ path: folderPath, error: err?.message || String(err) });
+		}
+	}
+
+	return { deleted, skipped, relocated, files_deleted: filesDeleted };
+}
+
+/**
+ * Move registered files into a storage folder path (same adapter).
+ * Updates filename_disk and moves the object (+ transforms).
+ */
+export async function moveFilesToStoragePath(
+	database: any,
+	location: string,
+	fileIds: string[],
+	targetPath: string,
+	logger?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<{
+	moved: number;
+	failed: number;
+	results: Array<{ id: string; from: string; to: string; status: 'moved' | 'failed'; error?: string }>;
+}> {
+	const target = normalizeStoragePath(targetPath);
+	const storage = await getStorageManager();
+	const disk = storage.location(location);
+	const results: Array<{ id: string; from: string; to: string; status: 'moved' | 'failed'; error?: string }> = [];
+
+	const rows = await database('directus_files')
+		.select('id', 'storage', 'filename_disk', 'type')
+		.where('storage', location)
+		.whereIn('id', fileIds.map(String));
+
+	for (const row of rows) {
+		const id = String(row.id);
+		const from = String(row.filename_disk || '');
+		const base = path.posix.basename(from);
+		const to = target ? `${target}/${base}` : base;
+
+		if (!from || from === to) {
+			results.push({ id, from, to, status: 'moved' });
+			continue;
+		}
+
+		try {
+			if (!(await diskExists(disk, from))) {
+				throw new Error('Source object missing on storage');
+			}
+			if (await diskExists(disk, to)) {
+				throw new Error(`Target already exists: ${to}`);
+			}
+
+			const stream = await diskRead(disk, from);
+			await diskWrite(disk, to, stream, row.type);
+			if (!(await diskExists(disk, to))) {
+				throw new Error('Write verification failed');
+			}
+
+			// AssetsService keeps transforms at storage root by basename — leave those alone.
+			// Only remove orphaned copies that sat beside the old nested path.
+			try {
+				const colocated = await diskListColocatedAssets(disk, from);
+				for (const rel of colocated) {
+					try {
+						await diskDelete(disk, rel);
+					} catch {
+						// best-effort
+					}
+				}
+			} catch {
+				// ignore
+			}
+
+			await diskDelete(disk, from);
+			await database('directus_files').where('id', id).update({ filename_disk: to });
+			results.push({ id, from, to, status: 'moved' });
+			logger?.info(`[storage-manager] Moved ${from} → ${to} on ${location}`);
+		} catch (err: any) {
+			results.push({ id, from, to, status: 'failed', error: err?.message || String(err) });
+			logger?.warn(`[storage-manager] Move failed for ${id}: ${err?.message}`);
+		}
+	}
+
+	return {
+		moved: results.filter((r) => r.status === 'moved').length,
+		failed: results.filter((r) => r.status === 'failed').length,
+		results,
+	};
+}
+
+/**
+ * After a flat upload, move the object under the current storage path if needed.
+ */
+export async function ensureFileUnderPath(
+	database: any,
+	fileId: string,
+	location: string,
+	targetPath: string,
+): Promise<string | null> {
+	const target = normalizeStoragePath(targetPath);
+	if (!target) return null;
+
+	const row = await database('directus_files')
+		.select('id', 'storage', 'filename_disk', 'type')
+		.where('id', fileId)
+		.first();
+	if (!row || String(row.storage) !== location) return null;
+
+	const from = String(row.filename_disk || '');
+	const base = path.posix.basename(from);
+	const to = `${target}/${base}`;
+	if (!from || from === to) return from;
+
+	const result = await moveFilesToStoragePath(database, location, [fileId], target);
+	const entry = result.results[0];
+	if (entry?.status === 'moved') return entry.to;
+	throw new Error(entry?.error || 'Failed to place file under storage path');
+}
+
+function parentStoragePath(folderPath: string): string {
+	const normalized = normalizeStoragePath(folderPath);
+	const idx = normalized.lastIndexOf('/');
+	return idx === -1 ? '' : normalized.slice(0, idx);
+}
+
+async function storageFolderExists(
+	database: any,
+	location: string,
+	folderPath: string,
+	env: Record<string, unknown>,
+): Promise<boolean> {
+	const target = normalizeStoragePath(folderPath);
+	if (!target) return false;
+
+	const row = await database('directus_files')
+		.select('id')
+		.where('storage', location)
+		.whereRaw('filename_disk LIKE ?', [`${target}/%`])
+		.first();
+	if (row) return true;
+
+	const parent = parentStoragePath(target);
+	const name = path.posix.basename(target);
+	const names = new Set<string>();
+	for (const n of await collectImmediateFoldersFromDb(database, location, parent)) names.add(n);
+	for (const n of await collectImmediateFoldersFromDisk(location, parent, env)) names.add(n);
+	for (const n of await collectKeepFoldersFromDisk(location, parent, env)) names.add(n);
+	return names.has(name);
+}
+
+/**
+ * Rename or move a physical storage folder (registered files + disk leftovers / `.keep`).
+ */
+export async function relocateStorageFolder(
+	database: any,
+	location: string,
+	fromPath: string,
+	toPath: string,
+	env: Record<string, unknown>,
+	logger?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<{ path: string; moved: number; failed: number }> {
+	const from = normalizeStoragePath(fromPath);
+	const to = normalizeStoragePath(toPath);
+	if (!from) throw new Error('Source folder path is required');
+	if (!to) throw new Error('Destination folder path is required');
+	if (from === to) return { path: to, moved: 0, failed: 0 };
+	if (to.startsWith(`${from}/`)) {
+		throw new Error('Cannot move a folder into itself');
+	}
+
+	const destName = path.posix.basename(to);
+	validateFolderName(destName);
+
+	if (await storageFolderExists(database, location, to, env)) {
+		throw new Error(`Folder already exists: ${to}`);
+	}
+
+	const { moved, failed } = await relocateFilesWithPrefixChange(database, location, from, to, logger);
+	if (failed > 0) {
+		throw new Error(`Failed to relocate ${failed} file(s) under ${from}`);
+	}
+
+	const driver = getLocationDriver(env, location);
+	if (driver === 'local') {
+		const root = getLocationRoot(env, location);
+		if (!root) throw new Error(`Local storage “${location}” has no STORAGE_${location.toUpperCase()}_ROOT`);
+		const absFrom = resolveLocalAbsolute(root, from);
+		const absTo = resolveLocalAbsolute(root, to);
+		await fs.mkdir(path.dirname(absTo), { recursive: true });
+		try {
+			await fs.access(absFrom);
+			try {
+				await fs.access(absTo);
+				// Destination already has moved files — merge leftovers then remove source.
+				const entries = await fs.readdir(absFrom, { withFileTypes: true });
+				for (const entry of entries) {
+					const src = path.join(absFrom, entry.name);
+					const dest = path.join(absTo, entry.name);
+					try {
+						await fs.rename(src, dest);
+					} catch {
+						// best-effort when dest already exists
+					}
+				}
+				await fs.rm(absFrom, { recursive: true, force: true });
+			} catch {
+				await fs.rename(absFrom, absTo);
+			}
+		} catch {
+			await fs.mkdir(absTo, { recursive: true });
+		}
+	} else {
+		const storage = await getStorageManager();
+		const disk = storage.location(location);
+		const prefix = `${from}/`;
+		try {
+			for await (const filepath of diskList(disk, prefix)) {
+				const name = String(filepath || '').replace(/^[/\\]+/, '');
+				if (!name.startsWith(prefix)) continue;
+				const dest = to + name.slice(from.length);
+				try {
+					if (await diskExists(disk, dest)) {
+						await diskDelete(disk, name);
+						continue;
+					}
+					const stream = await diskRead(disk, name);
+					await diskWrite(disk, dest, stream, 'application/octet-stream');
+					await diskDelete(disk, name);
+				} catch (err: any) {
+					logger?.warn(`[storage-manager] Folder leftover move failed ${name}: ${err?.message}`);
+				}
+			}
+		} catch {
+			// list unsupported — ensure destination keep
+		}
+
+		const keepKey = `${to}/${STORAGE_FOLDER_KEEP}`;
+		if (!(await diskExists(disk, keepKey))) {
+			const empty = Readable.from([Buffer.alloc(0)]);
+			await diskWrite(disk, keepKey, empty, 'application/octet-stream');
+		}
+		const oldKeep = `${from}/${STORAGE_FOLDER_KEEP}`;
+		if (await diskExists(disk, oldKeep)) {
+			try {
+				await diskDelete(disk, oldKeep);
+			} catch {
+				// best-effort
+			}
+		}
+	}
+
+	logger?.info(`[storage-manager] Relocated folder ${from} → ${to} on ${location} (${moved} file(s))`);
+	return { path: to, moved, failed };
+}
+
+/**
+ * Rename a storage folder in place (same parent).
+ */
+export async function renameStorageFolder(
+	database: any,
+	location: string,
+	folderPath: string,
+	newName: string,
+	env: Record<string, unknown>,
+	logger?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<{ path: string; moved: number; failed: number }> {
+	const from = normalizeStoragePath(folderPath);
+	if (!from) throw new Error('Folder path is required');
+	const name = validateFolderName(newName);
+	const to = joinStoragePath(parentStoragePath(from), name);
+	return relocateStorageFolder(database, location, from, to, env, logger);
+}
+
+/**
+ * Move a storage folder under a new parent path (name unchanged).
+ */
+export async function moveStorageFolder(
+	database: any,
+	location: string,
+	folderPath: string,
+	parentPath: string,
+	env: Record<string, unknown>,
+	logger?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<{ path: string; moved: number; failed: number }> {
+	const from = normalizeStoragePath(folderPath);
+	if (!from) throw new Error('Folder path is required');
+	const parent = normalizeStoragePath(parentPath);
+	const name = path.posix.basename(from);
+	const to = joinStoragePath(parent, name);
+	return relocateStorageFolder(database, location, from, to, env, logger);
+}
+
+/**
+ * Rewrite every filename_disk under `oldPrefix/` to `newPrefix/` on the same adapter
+ * (physical object + transform siblings + DB). Used by by-name folder mirror sync.
+ */
+export async function relocateFilesWithPrefixChange(
+	database: any,
+	location: string,
+	oldPrefix: string,
+	newPrefix: string,
+	logger?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<{ moved: number; failed: number }> {
+	const fromPrefix = normalizeStoragePath(oldPrefix);
+	const toPrefix = normalizeStoragePath(newPrefix);
+	if (!fromPrefix || fromPrefix === toPrefix) return { moved: 0, failed: 0 };
+
+	const rows = await database('directus_files')
+		.select('id', 'filename_disk', 'type')
+		.where('storage', location)
+		.whereRaw('filename_disk LIKE ?', [`${fromPrefix}/%`]);
+
+	if (!rows.length) return { moved: 0, failed: 0 };
+
+	const storage = await getStorageManager();
+	const disk = storage.location(location);
+	let moved = 0;
+	let failed = 0;
+
+	for (const row of rows) {
+		const id = String(row.id);
+		const from = String(row.filename_disk || '');
+		if (!from.startsWith(`${fromPrefix}/`)) continue;
+		if (isKeepMarker(from)) continue;
+		const rest = from.slice(fromPrefix.length).replace(/^\//, '');
+		const to = toPrefix ? `${toPrefix}/${rest}` : rest;
+
+		try {
+			if (from === to) {
+				moved++;
+				continue;
+			}
+			if (!(await diskExists(disk, from))) {
+				// DB-only repair when object already missing / already moved
+				await database('directus_files').where('id', id).update({ filename_disk: to });
+				moved++;
+				logger?.warn(`[storage-manager] Prefix relocate DB-only (missing source): ${from} → ${to}`);
+				continue;
+			}
+			if (await diskExists(disk, to)) {
+				throw new Error(`Target already exists: ${to}`);
+			}
+
+			const stream = await diskRead(disk, from);
+			await diskWrite(disk, to, stream, row.type);
+			if (!(await diskExists(disk, to))) {
+				throw new Error('Write verification failed');
+			}
+
+			// Same-adapter path rewrite: keep root transforms; drop colocated orphans only.
+			try {
+				const colocated = await diskListColocatedAssets(disk, from);
+				for (const rel of colocated) {
+					try {
+						await diskDelete(disk, rel);
+					} catch {
+						// best-effort
+					}
+				}
+			} catch {
+				// ignore
+			}
+
+			await diskDelete(disk, from);
+			await database('directus_files').where('id', id).update({ filename_disk: to });
+			moved++;
+			logger?.info(`[storage-manager] Prefix relocate ${from} → ${to} on ${location}`);
+		} catch (err: any) {
+			failed++;
+			logger?.warn(`[storage-manager] Prefix relocate failed for ${id}: ${err?.message}`);
+		}
+	}
+
+	return { moved, failed };
+}

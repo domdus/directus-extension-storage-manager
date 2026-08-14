@@ -7,7 +7,8 @@
  * https://github.com/directus/directus/blob/v11.17.0/app/src/modules/files/routes/collection.vue
  */
 import { useLayout } from '@directus/composables';
-import { computed, onMounted, ref, watch } from 'vue';
+import { useApi } from '@directus/extensions-sdk';
+import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from 'vue-router';
 import ModuleNavigation from '../navigation.vue';
 import SearchInput from './search-input.vue';
@@ -16,47 +17,98 @@ import LayoutSidebarDetail from './layout-sidebar-detail.vue';
 import MigrateDrawer from './migrate-drawer.vue';
 import ImportOrphansDrawer from './import-orphans-drawer.vue';
 import UsageBar from './usage-bar.vue';
+import StorageSettings from './storage-settings.vue';
+import AddStorageFolder from './add-storage-folder.vue';
+import StorageFolderSection from './storage-folder-section.vue';
+import StorageTargetPicker from './storage-target-picker.vue';
+import type { StorageTarget } from './storage-target-picker.vue';
+import DeleteStorageFolderDialog from './delete-storage-folder-dialog.vue';
+import UploadFilesDialog from './upload-files-dialog.vue';
 import { useDropUpload } from '../composables/use-drop-upload';
 import { useFilesBrowserPreset } from '../composables/use-files-browser-preset';
 import { useFolders } from '../composables/use-folders';
 import { useStorageManager } from '../composables/use-storage-manager';
+import { useStorageFolderTrees } from '../composables/use-storage-folder-trees';
 import { useMigrateJob } from '../composables/use-migrate-job';
+import { usePageClass } from '../composables/use-page-class';
 import { getFolderFilter, getStorageFilter, mergeFilters } from '../utils/filters';
+import { DIRECTUS_FOLDERS_PAGE_INTRO, VIRTUAL_FOLDER_NOTE } from '../../shared/strategies';
 import { formatBytes } from '../../shared/format';
+import { storageManagerPath } from '../../shared/storage-path-url';
+import type { StorageBrowseFolder } from '../../shared/types';
 
 const props = defineProps<{
 	mode: 'folders' | 'storage';
 	folder?: string;
 	storage?: string;
+	/** Physical path within a storage adapter (storage mode only). */
+	storagePath?: string;
 }>();
 
+const api = useApi();
 const route = useRoute();
 const router = useRouter();
 const { folders } = useFolders();
 const { storages, loadStorages } = useStorageManager();
-const { running: migrateRunning, reopenNonce } = useMigrateJob();
+const { refreshTree } = useStorageFolderTrees();
+const { running: migrateRunning, reopenNonce, start: startMigrate } = useMigrateJob();
+const pageClass = usePageClass();
 
 const layoutRef = ref();
 const selection = ref<string[]>([]);
+const folderSelection = ref<string[]>([]);
+const storageFolders = ref<StorageBrowseFolder[]>([]);
+const foldersLoading = ref(false);
 
-const { layout, layoutOptions, layoutQuery, filter, search, resetPreset } = useFilesBrowserPreset();
+const moveToDialogActive = ref(false);
+const selectedMoveTarget = ref<StorageTarget>({ location: '', path: '' });
+const moving = ref(false);
+
+const confirmDelete = ref(false);
+const confirmDeleteFolders = ref(false);
+const deletingFiles = ref(false);
+
+/** Distinct storage adapters used by files in the current Directus folder view. */
+const folderStorages = ref<string[]>([]);
+
+const { layout, layoutOptions, layoutQuery, filter, search, resetPreset, resetPage } = useFilesBrowserPreset();
 const { layoutWrapper } = useLayout(layout);
+
+const normalizedStoragePath = computed(() =>
+	String(props.storagePath || '')
+		.replace(/\\/g, '/')
+		.replace(/^\/+|\/+$/g, ''),
+);
 
 const systemFilter = computed(() => {
 	if (props.mode === 'storage' && props.storage) {
-		return getStorageFilter(props.storage);
+		return getStorageFilter(
+			props.storage,
+			normalizedStoragePath.value,
+			storageFolders.value.map((f) => f.name),
+		);
 	}
 	return getFolderFilter(props.folder ?? null);
 });
 
 const title = computed(() => {
-	if (props.mode === 'storage') return props.storage || 'Storage';
+	if (props.mode === 'storage') {
+		if (normalizedStoragePath.value) {
+			const parts = normalizedStoragePath.value.split('/');
+			return parts[parts.length - 1] || props.storage || 'Storage';
+		}
+		return props.storage || 'Storage';
+	}
 	if (props.folder) {
 		const folder = folders.value?.find((f) => f.id === props.folder);
 		return folder?.name || 'Folder';
 	}
-	return 'Folders';
+	return 'Directus Folders';
 });
+
+const showFoldersPageIntro = computed(
+	() => props.mode === 'folders' && !props.folder && !search.value && !filter.value,
+);
 
 const breadcrumb = computed(() => {
 	const items = [{ name: 'Storage Manager', to: '/storage-manager' }];
@@ -65,8 +117,19 @@ const breadcrumb = computed(() => {
 			name: props.storage || 'Storage',
 			to: `/storage-manager/storage/${props.storage}`,
 		});
+		if (normalizedStoragePath.value) {
+			const segments = normalizedStoragePath.value.split('/').filter(Boolean);
+			let acc = '';
+			for (const segment of segments) {
+				acc = acc ? `${acc}/${segment}` : segment;
+				items.push({
+					name: segment,
+					to: storageManagerPath(props.storage!, acc),
+				});
+			}
+		}
 	} else {
-		items.push({ name: 'Folders', to: '/storage-manager/folders' });
+		items.push({ name: 'Directus Folders', to: '/storage-manager/folders' });
 		if (props.folder) {
 			items.push({
 				name: title.value,
@@ -84,11 +147,17 @@ const storageInfo = computed(() => {
 
 const drawerOpen = ref(false);
 const importOpen = ref(false);
-const selectionKind = ref<'files' | 'storage' | 'folder'>('files');
+const selectionKind = ref<'files' | 'storage' | 'folder' | 'storage_path'>('files');
+/** Resolved file IDs for Migrate Selected (includes files under selected storage folders). */
+const migrateSelectedIds = ref<string[]>([]);
+const migrateSelectedLoading = ref(false);
 
 const estimateCount = computed(() => {
-	if (selectionKind.value === 'files') return selection.value.length;
+	if (selectionKind.value === 'files') {
+		return migrateSelectedIds.value.length || selection.value.length || undefined;
+	}
 	if (selectionKind.value === 'storage') return storageInfo.value?.file_count ?? undefined;
+	if (selectionKind.value === 'folder') return folderMigrateCount.value ?? undefined;
 	return undefined;
 });
 
@@ -97,20 +166,266 @@ const estimateBytes = computed(() => {
 	return undefined;
 });
 
+/** Direct files in the current virtual folder view (root = unfiled). */
+const folderMigrateCount = ref<number | null>(null);
+
+const multiStorageFolder = computed(
+	() => props.mode === 'folders' && folderStorages.value.length > 1,
+);
+
+/** Show per-file storage labels when the current folder spans multiple adapters. */
+const showStorageLocationLabels = multiStorageFolder;
+
+const defaultTabularFields = ['title', 'type', 'filesize', 'modified_on'];
+
+const effectiveLayoutQuery = computed({
+	get() {
+		const query = { ...layoutQuery.value };
+		if (!showStorageLocationLabels.value || layout.value !== 'tabular') {
+			return query;
+		}
+
+		const fields = [...(query.fields?.length ? query.fields : defaultTabularFields)];
+		if (!fields.includes('storage')) {
+			fields.push('storage');
+		}
+
+		return { ...query, fields };
+	},
+	set(value) {
+		layoutQuery.value = value;
+	},
+});
+
+const multiStorageNotice = computed(() => {
+	if (!multiStorageFolder.value) return '';
+	const list = folderStorages.value.join(', ');
+	const scope = props.folder ? 'folder' : 'root view';
+	return `This ${scope} has files on ${folderStorages.value.length} storages (${list}). Sync Folder Changes updates each adapter separately.`;
+});
+
+const canMigrateFolder = computed(
+	() =>
+		props.mode === 'folders' &&
+		selection.value.length === 0 &&
+		folderMigrateCount.value !== null &&
+		folderMigrateCount.value > 0,
+);
+
+/** Whole-adapter migrate in header — storage root only, nothing selected. */
+const canMigrateStorage = computed(
+	() =>
+		props.mode === 'storage' &&
+		Boolean(props.storage) &&
+		!normalizedStoragePath.value &&
+		selection.value.length === 0 &&
+		folderSelection.value.length === 0,
+);
+
+const detectLabel = computed(() =>
+	normalizedStoragePath.value ? 'Detect Files in this Folder' : `Detect Files on ${props.storage}`,
+);
+
+/** Nothing selected — show browse-level actions (upload / detect / migrate whole scope). */
+const nothingSelected = computed(
+	() => selection.value.length === 0 && folderSelection.value.length === 0,
+);
+
+/** Move selected files to any adapter + path (physical folders use the context menu). */
+const canMoveSelectedFiles = computed(
+	() => selection.value.length > 0 && folderSelection.value.length === 0,
+);
+
+/** Migrate Selected only when storage folders are selected (files use Move). */
+const canMigrateSelected = computed(
+	() => props.mode === 'storage' && folderSelection.value.length > 0,
+);
+
+/** Delete when files and/or storage folders are selected. */
+const canDeleteSelection = computed(
+	() => selection.value.length > 0 || (props.mode === 'storage' && folderSelection.value.length > 0),
+);
+
+const migrateSelectedLabel = computed(() => {
+	if (folderSelection.value.length > 0 && selection.value.length === 0) {
+		return folderSelection.value.length === 1 ? 'Migrate Selected Folder' : 'Migrate Selected Folders';
+	}
+	return 'Migrate Selected';
+});
+
+const deleteConfirmText = computed(() => {
+	const n = selection.value.length;
+	return n === 1
+		? 'Are you sure you want to delete this item? This action cannot be undone.'
+		: `Are you sure you want to delete ${n} items? This action cannot be undone.`;
+});
+
+function openDelete() {
+	if (props.mode === 'storage' && folderSelection.value.length > 0) {
+		confirmDeleteFolders.value = true;
+	} else {
+		confirmDelete.value = true;
+	}
+}
+
+async function refreshFolderMigrateCount() {
+	if (props.mode !== 'folders') {
+		folderMigrateCount.value = null;
+		return;
+	}
+
+	try {
+		const res = await api.get('/files', {
+			params: {
+				limit: 0,
+				meta: 'filter_count',
+				filter: JSON.stringify(getFolderFilter(props.folder ?? null)),
+			},
+		});
+		folderMigrateCount.value = Number(res.data?.meta?.filter_count ?? 0);
+	} catch {
+		folderMigrateCount.value = 0;
+	}
+}
+
+async function refreshFolderStorages() {
+	if (props.mode !== 'folders') {
+		folderStorages.value = [];
+		return;
+	}
+
+	try {
+		const res = await api.get('/files', {
+			params: {
+				filter: JSON.stringify(getFolderFilter(props.folder ?? null)),
+				fields: ['storage'],
+				limit: -1,
+			},
+		});
+		const set = new Set<string>();
+		for (const row of res.data?.data || []) {
+			const loc = String(row?.storage || '').trim();
+			if (loc) set.add(loc);
+		}
+		folderStorages.value = Array.from(set).sort((a, b) => a.localeCompare(b));
+	} catch {
+		folderStorages.value = [];
+	}
+}
+
+const CARD_STORAGE_BADGE_CLASS = 'storage-location-badge';
+
+function clearCardStorageBadges() {
+	document.querySelectorAll(`.layout-cards .header .${CARD_STORAGE_BADGE_CLASS}`).forEach((el) => {
+		el.remove();
+	});
+}
+
+async function applyCardStorageBadges(items: Record<string, any>[] | undefined) {
+	clearCardStorageBadges();
+
+	if (!showStorageLocationLabels.value || layout.value !== 'cards' || !items?.length) {
+		return;
+	}
+
+	await nextTick();
+
+	const cards = document.querySelectorAll('.layout-cards .grid .card');
+	if (!cards.length) return;
+
+	const pk = 'id';
+	const missingStorage = items.some((item) => item[pk] != null && item.storage == null);
+	let storageById: Record<string, string> = {};
+
+	if (missingStorage) {
+		const ids = items.map((item) => item[pk]).filter(Boolean);
+		if (!ids.length) return;
+
+		try {
+			const res = await api.get('/files', {
+				params: {
+					filter: JSON.stringify({ id: { _in: ids } }),
+					fields: ['id', 'storage'],
+					limit: ids.length,
+				},
+			});
+
+			for (const row of res.data?.data || []) {
+				storageById[String(row.id)] = String(row.storage || '');
+			}
+		} catch {
+			return;
+		}
+	}
+
+	cards.forEach((cardEl, index) => {
+		const item = items[index];
+		if (!item) return;
+
+		const storage = String(item.storage ?? storageById[String(item[pk])] ?? '').trim();
+		if (!storage) return;
+
+		const header = cardEl.querySelector('.header');
+		if (!header) return;
+
+		const badge = document.createElement('span');
+		badge.className = CARD_STORAGE_BADGE_CLASS;
+		badge.textContent = storage;
+		header.appendChild(badge);
+	});
+}
+
+function scheduleCardStorageBadges(items: Record<string, any>[] | undefined) {
+	void applyCardStorageBadges(items).catch(() => undefined);
+}
+
 onBeforeRouteLeave((to, from) => {
-	if (to.path !== from.path) selection.value = [];
+	if (to.path !== from.path) {
+		selection.value = [];
+		folderSelection.value = [];
+		confirmDelete.value = false;
+		confirmDeleteFolders.value = false;
+		clearCardStorageBadges();
+	}
 });
 
 onBeforeRouteUpdate((to, from) => {
 	// Keep selection when only opening/closing the file drawer (?file=)
-	if (to.path !== from.path) selection.value = [];
+	if (to.path !== from.path) {
+		selection.value = [];
+		folderSelection.value = [];
+		confirmDelete.value = false;
+		confirmDeleteFolders.value = false;
+	}
 });
 
 watch(
-	() => [props.folder, props.storage, props.mode] as const,
+	() => [props.folder, props.storage, props.mode, normalizedStoragePath.value] as const,
 	() => {
 		selection.value = [];
+		folderSelection.value = [];
+		resetPage();
+		refreshFolderMigrateCount();
+		refreshFolderStorages();
+		clearCardStorageBadges();
 	},
+);
+
+watch(
+	() => [
+		showStorageLocationLabels.value,
+		layout.value,
+		layoutQuery.value.page,
+		layoutQuery.value.limit,
+		JSON.stringify(layoutQuery.value.sort ?? []),
+		layoutRef.value?.state?.loading,
+		layoutRef.value?.state?.items,
+	] as const,
+	() => {
+		if (layoutRef.value?.state?.loading) return;
+		scheduleCardStorageBadges(layoutRef.value?.state?.items);
+	},
+	{ deep: true, flush: 'post' },
 );
 
 watch(
@@ -125,11 +440,45 @@ watch(
 
 onMounted(() => {
 	loadStorages().catch(() => undefined);
+	loadStorageFolders().catch(() => undefined);
+	refreshFolderMigrateCount().catch(() => undefined);
+	refreshFolderStorages().catch(() => undefined);
 });
+
+watch(
+	() => [props.mode, props.storage, normalizedStoragePath.value] as const,
+	() => {
+		void loadStorageFolders();
+	},
+);
 
 async function refresh() {
 	await layoutRef.value?.state?.refresh?.();
 	await loadStorages(true).catch(() => undefined);
+	await loadStorageFolders();
+	await refreshFolderMigrateCount().catch(() => undefined);
+	await refreshFolderStorages().catch(() => undefined);
+	if (props.mode === 'storage' && props.storage) {
+		await refreshTree(props.storage).catch(() => undefined);
+	}
+}
+
+async function loadStorageFolders() {
+	if (props.mode !== 'storage' || !props.storage) {
+		storageFolders.value = [];
+		return;
+	}
+	foldersLoading.value = true;
+	try {
+		const res = await api.get(`/storage-manager/storages/${encodeURIComponent(props.storage)}/browse`, {
+			params: { path: normalizedStoragePath.value || '' },
+		});
+		storageFolders.value = (res.data?.data?.folders || []) as StorageBrowseFolder[];
+	} catch {
+		storageFolders.value = [];
+	} finally {
+		foldersLoading.value = false;
+	}
 }
 
 function clearFilters() {
@@ -137,7 +486,68 @@ function clearFilters() {
 	search.value = null;
 }
 
-function openMigrate(kind: 'files' | 'storage' | 'folder') {
+async function resolveSelectedFileIds(): Promise<string[]> {
+	const ids = new Set(selection.value.map(String));
+
+	if (props.mode === 'storage' && props.storage && folderSelection.value.length) {
+		for (const folderPath of folderSelection.value) {
+			const prefix = String(folderPath || '')
+				.replace(/\\/g, '/')
+				.replace(/^\/+|\/+$/g, '');
+			if (!prefix) continue;
+
+			try {
+				const res = await api.get('/files', {
+					params: {
+						limit: -1,
+						fields: ['id'],
+						filter: JSON.stringify({
+							_and: [
+								{ storage: { _eq: props.storage } },
+								{ filename_disk: { _starts_with: `${prefix}/` } },
+							],
+						}),
+					},
+				});
+				for (const row of res.data?.data || []) {
+					ids.add(String(row.id));
+				}
+			} catch {
+				// ignore per-folder failures; empty set handled by caller
+			}
+		}
+	}
+
+	return Array.from(ids);
+}
+
+async function openMigrateSelected() {
+	if (migrateSelectedLoading.value) return;
+	migrateSelectedLoading.value = true;
+	try {
+		const ids = await resolveSelectedFileIds();
+		if (!ids.length) {
+			window.alert(
+				folderSelection.value.length
+					? 'Selected folder(s) contain no registered files to migrate.'
+					: 'No files selected.',
+			);
+			return;
+		}
+		migrateSelectedIds.value = ids;
+		selectionKind.value = 'files';
+		drawerOpen.value = true;
+	} finally {
+		migrateSelectedLoading.value = false;
+	}
+}
+
+function openMigrate(kind: 'files' | 'storage' | 'folder' | 'storage_path') {
+	if (kind === 'files') {
+		void openMigrateSelected();
+		return;
+	}
+	migrateSelectedIds.value = [];
 	selectionKind.value = kind;
 	drawerOpen.value = true;
 }
@@ -160,11 +570,14 @@ function onDetectOpenChange(open: boolean) {
 
 async function onMigrated() {
 	selection.value = [];
+	folderSelection.value = [];
+	migrateSelectedIds.value = [];
 	await refresh();
 }
 
 async function onImported() {
 	selection.value = [];
+	folderSelection.value = [];
 	await refresh();
 }
 
@@ -195,20 +608,128 @@ watch(
 
 const uploadPreset = computed(() => {
 	if (props.mode === 'storage') {
-		return { storage: props.storage };
+		return { storage: props.storage, storagePath: normalizedStoragePath.value || null };
 	}
 	return { folder: props.folder ?? null };
 });
 
-const fileInput = ref<HTMLInputElement | null>(null);
+const uploadDialogOpen = ref(false);
 
-const { dragging, showDropEffect, uploading, onFileInputChange } = useDropUpload({
+const { dragging, showDropEffect, uploading, uploadFiles } = useDropUpload({
 	preset: uploadPreset,
 	onDone: refresh,
 });
 
-function openFilePicker() {
-	fileInput.value?.click();
+const uploadDialogTitle = computed(() => {
+	if (props.mode === 'storage' && props.storage) return `Upload to ${props.storage}`;
+	return 'Add File';
+});
+
+function openUploadDialog() {
+	uploadDialogOpen.value = true;
+}
+
+async function onUploadDialogFiles(files: globalThis.File[]) {
+	await uploadFiles(files);
+}
+
+watch(moveToDialogActive, (open) => {
+	if (!open) return;
+	const fallback = props.storage || storages.value[0]?.location || '';
+	selectedMoveTarget.value = {
+		location: fallback,
+		path: props.mode === 'storage' ? normalizedStoragePath.value || '' : '',
+	};
+});
+
+async function batchDeleteFiles() {
+	if (deletingFiles.value || !selection.value.length) return;
+	deletingFiles.value = true;
+	try {
+		await api.delete('/files', { data: selection.value });
+		selection.value = [];
+		confirmDelete.value = false;
+		await refresh();
+	} catch (err: any) {
+		window.alert(err?.response?.data?.errors?.[0]?.message || err?.message || 'Delete failed');
+	} finally {
+		deletingFiles.value = false;
+	}
+}
+
+/** After folder delete dialog: also remove any separately selected files (File Library parity). */
+async function onStorageFolderDeleteDone() {
+	try {
+		if (selection.value.length > 0) {
+			await api.delete('/files', { data: selection.value });
+		}
+	} catch (err: any) {
+		window.alert(err?.response?.data?.errors?.[0]?.message || err?.message || 'Delete failed');
+	}
+
+	selection.value = [];
+	folderSelection.value = [];
+	confirmDeleteFolders.value = false;
+	await refresh();
+	if (props.storage) {
+		await refreshTree(props.storage).catch(() => undefined);
+	}
+}
+
+async function moveToStorageFolder() {
+	const targetLoc = selectedMoveTarget.value.location;
+	const targetPath = selectedMoveTarget.value.path || '';
+	if (!targetLoc || !selection.value.length) return;
+
+	moving.value = true;
+	const fileIds = [...selection.value];
+
+	try {
+		const res = await api.get('/files', {
+			params: {
+				limit: -1,
+				fields: ['id', 'storage'],
+				filter: JSON.stringify({ id: { _in: fileIds } }),
+			},
+		});
+		const rows = (res.data?.data || []) as Array<{ id: string; storage: string }>;
+		const needCross = rows.filter((r) => String(r.storage) !== targetLoc).map((r) => String(r.id));
+
+		if (!needCross.length) {
+			await api.post(`/storage-manager/storages/${encodeURIComponent(targetLoc)}/move-files`, {
+				file_ids: fileIds,
+				target_path: targetPath,
+			});
+			moveToDialogActive.value = false;
+			selection.value = [];
+			await refresh();
+			return;
+		}
+
+		// Cross-adapter: migrate first (progress in migrate drawer), then place under path.
+		moveToDialogActive.value = false;
+		moving.value = false;
+
+		const migratePromise = startMigrate(
+			{ file_ids: needCross, target_storage: targetLoc, mode: 'move' },
+			{ estimatedCount: needCross.length },
+		);
+		drawerOpen.value = true;
+		await migratePromise;
+
+		await api.post(`/storage-manager/storages/${encodeURIComponent(targetLoc)}/move-files`, {
+			file_ids: fileIds,
+			target_path: targetPath,
+		});
+
+		selection.value = [];
+		folderSelection.value = [];
+		await refresh();
+	} catch (err: any) {
+		window.alert(err?.response?.data?.errors?.[0]?.message || err?.message || 'Move failed');
+	} finally {
+		moving.value = false;
+	}
 }
 
 /**
@@ -251,11 +772,20 @@ function onFileDrawerActive(open: boolean) {
 	}
 }
 
+function onSelectAllFolders() {
+	if (props.mode !== 'storage') return;
+	folderSelection.value = storageFolders.value.map((f) => f.path);
+}
+
 function bindLayout(layoutState: Record<string, any>) {
 	const pkField = layoutState.primaryKeyField?.field || 'id';
+	const hasFolders =
+		props.mode === 'storage' && storageFolders.value.length > 0 && !search.value && !filter.value;
 
-	return {
+	const bound: Record<string, any> = {
 		...layoutState,
+		hasPrependContent: hasFolders,
+		selectMode: layoutState.selectMode || folderSelection.value.length > 0,
 		getLinkForItem(item: Record<string, any>) {
 			const id = item?.[pkField];
 			if (id == null) return;
@@ -265,7 +795,7 @@ function bindLayout(layoutState: Record<string, any>) {
 			const primaryKey = item?.[pkField];
 			if (primaryKey == null) return;
 
-			if (selection.value.length > 0) {
+			if (selection.value.length > 0 || folderSelection.value.length > 0) {
 				if (!selection.value.includes(primaryKey)) {
 					selection.value = selection.value.concat(primaryKey);
 				} else {
@@ -279,6 +809,22 @@ function bindLayout(layoutState: Record<string, any>) {
 			else router.push(path);
 		},
 	};
+
+	if (showStorageLocationLabels.value && layout.value === 'tabular' && Array.isArray(layoutState.tableHeaders)) {
+		bound.tableHeaders = layoutState.tableHeaders.map((header: Record<string, any>) => {
+			if (header.value !== 'storage') return header;
+			return {
+				...header,
+				field: {
+					...header.field,
+					display: 'storage-location-badge',
+					displayOptions: header.field?.displayOptions ?? {},
+				},
+			};
+		});
+	}
+
+	return bound;
 }
 </script>
 
@@ -289,7 +835,7 @@ function bindLayout(layoutState: Record<string, any>) {
 		v-slot="{ layoutState }"
 		v-model:selection="selection"
 		v-model:layout-options="layoutOptions"
-		v-model:layout-query="layoutQuery"
+		v-model:layout-query="effectiveLayoutQuery"
 		:filter="mergeFilters(filter, systemFilter)"
 		:filter-user="filter"
 		:filter-system="systemFilter"
@@ -311,44 +857,114 @@ function bindLayout(layoutState: Record<string, any>) {
 			</template>
 
 			<template #actions>
-				<input
-					ref="fileInput"
-					class="upload-input"
-					type="file"
-					multiple
-					@change="onFileInputChange"
-				/>
-
 				<search-input v-model="search" v-model:filter="filter" collection="directus_files" />
 
+				<add-storage-folder
+					v-if="mode === 'storage' && storage"
+					:location="storage"
+					:parent-path="normalizedStoragePath"
+					@created="refresh"
+				/>
+
+				<v-dialog
+					v-if="canMoveSelectedFiles"
+					v-model="moveToDialogActive"
+					@esc="moveToDialogActive = false"
+					@apply="moveToStorageFolder"
+				>
+					<template #activator="{ on }">
+						<header-action-button
+							v-tooltip.bottom="'Move to Storage Folder'"
+							icon="folder_move"
+							secondary
+							@click="on"
+						/>
+					</template>
+					<v-card>
+						<v-card-title>Move to Storage Folder</v-card-title>
+						<v-card-text>
+							<storage-target-picker v-model="selectedMoveTarget" />
+						</v-card-text>
+						<v-card-actions>
+							<v-button secondary @click="moveToDialogActive = false">Cancel</v-button>
+							<v-button
+								:disabled="!selectedMoveTarget.location"
+								:loading="moving"
+								@click="moveToStorageFolder"
+							>
+								Move
+							</v-button>
+						</v-card-actions>
+					</v-card>
+				</v-dialog>
+
 				<header-action-button
-					v-if="mode === 'storage' && !selection.length"
-					v-tooltip.bottom="`Detect Files on ${storage}`"
+					v-if="canDeleteSelection"
+					v-tooltip.bottom="'Delete'"
+					class="action-delete"
+					icon="delete"
+					secondary
+					:disabled="deletingFiles"
+					@click="openDelete"
+				/>
+
+				<v-dialog v-model="confirmDelete" @esc="confirmDelete = false" @apply="batchDeleteFiles">
+					<v-card>
+						<v-card-title>Delete {{ selection.length === 1 ? 'Item' : 'Items' }}</v-card-title>
+						<v-card-text>{{ deleteConfirmText }}</v-card-text>
+						<v-card-actions>
+							<v-button secondary @click="confirmDelete = false">Cancel</v-button>
+							<v-button kind="danger" :loading="deletingFiles" @click="batchDeleteFiles">Delete</v-button>
+						</v-card-actions>
+					</v-card>
+				</v-dialog>
+
+				<delete-storage-folder-dialog
+					v-if="mode === 'storage' && storage"
+					v-model="confirmDeleteFolders"
+					:location="storage"
+					:paths="folderSelection"
+					@done="onStorageFolderDeleteDone"
+				/>
+
+				<header-action-button
+					v-if="mode === 'storage' && nothingSelected"
+					v-tooltip.bottom="detectLabel"
 					icon="radar"
 					secondary
 					@click="openDetect"
 				/>
 
 				<header-action-button
-					v-if="selection.length"
-					v-tooltip.bottom="'Migrate Selected'"
-					icon="drive_file_move"
+					v-if="canMigrateSelected"
+					v-tooltip.bottom="migrateSelectedLabel"
+					icon="swap_horiz"
 					secondary
+					:loading="migrateSelectedLoading"
 					@click="openMigrate('files')"
 				/>
 
 				<header-action-button
-					v-if="mode === 'storage'"
-					v-tooltip.bottom="'Migrate All'"
+					v-if="canMigrateStorage"
+					v-tooltip.bottom="`Migrate ${storage}`"
 					icon="swap_horiz"
+					secondary
 					@click="openMigrate('storage')"
 				/>
 
 				<header-action-button
-					v-else
+					v-else-if="canMigrateFolder"
 					v-tooltip.bottom="folder ? 'Migrate This Folder' : 'Migrate Root Files'"
-					icon="swap_horiz"
+					icon="folder_move"
+					secondary
 					@click="openMigrate('folder')"
+				/>
+
+				<header-action-button
+					v-tooltip.bottom="'Upload File'"
+					icon="add"
+					:loading="uploading"
+					@click="openUploadDialog"
 				/>
 			</template>
 
@@ -363,12 +979,48 @@ function bindLayout(layoutState: Record<string, any>) {
 				<div class="drop-border left" />
 			</template>
 
-			<component :is="`layout-${layout}`" v-bind="bindLayout(layoutState)">
+			<div v-if="showFoldersPageIntro" :class="pageClass">
+				<v-divider
+					class="section-divider"
+					large
+					:inline-title="false"
+					:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
+				>
+					<template #icon><v-icon name="folder_special" /></template>
+					Directus Folders
+				</v-divider>
+
+				<p class="page-intro">{{ DIRECTUS_FOLDERS_PAGE_INTRO }}</p>
+			</div>
+
+			<v-notice v-if="multiStorageFolder" type="info" class="multi-storage-notice">
+				{{ multiStorageNotice }}
+			</v-notice>
+
+			<component
+				:is="`layout-${layout}`"
+				v-bind="bindLayout(layoutState)"
+				v-model:extra-selection="folderSelection"
+				@select-all="onSelectAllFolders"
+			>
+				<template
+					v-if="mode === 'storage' && storageFolders.length && !search && !filter"
+					#prepend
+				>
+					<storage-folder-section
+						v-model:selection="folderSelection"
+						:location="storage!"
+						:folders="storageFolders"
+						:any-file-selection="selection.length > 0"
+						@changed="refresh"
+					/>
+				</template>
+
 				<template #no-results>
 					<v-info v-if="!filter && !search" title="No files" icon="folder" center>
 						Drop files here to upload, or use the + button.
 						<template #append>
-							<v-button @click="openFilePicker">Add file</v-button>
+							<v-button @click="openUploadDialog">Add File</v-button>
 						</template>
 					</v-info>
 					<v-info v-else title="No results" icon="search" center>
@@ -381,9 +1033,13 @@ function bindLayout(layoutState: Record<string, any>) {
 
 				<template #no-items>
 					<v-info title="No files" icon="folder" center>
-						Drop files here to upload, or use the + button.
+						<template v-if="foldersLoading">Loading storage folders…</template>
+						<template v-else>
+							Drop files here to upload, or use the + button.
+							<template v-if="mode === 'storage'"> Create a storage folder with the folder icon. </template>
+						</template>
 						<template #append>
-							<v-button @click="openFilePicker">Add file</v-button>
+							<v-button @click="openUploadDialog">Add File</v-button>
 						</template>
 					</v-info>
 				</template>
@@ -406,43 +1062,47 @@ function bindLayout(layoutState: Record<string, any>) {
 				<sidebar-detail id="actions" icon="swap_horiz" title="Actions">
 					<div class="sidebar-actions">
 						<v-button
-							v-if="!selection.length"
+							v-if="nothingSelected"
 							secondary
 							full-width
 							class="sidebar-btn"
 							:loading="uploading"
-							@click="openFilePicker"
+							@click="openUploadDialog"
 						>
 							{{ mode === 'storage' ? `Upload to ${storage}` : 'Upload Files' }}
 						</v-button>
 						<v-button
-							v-if="mode === 'storage' && !selection.length"
+							v-if="mode === 'storage' && nothingSelected"
 							secondary
 							full-width
 							class="sidebar-btn"
 							@click="openDetect"
 						>
-							Detect Files on {{ storage }}
+							{{ detectLabel }}
 						</v-button>
 						<v-button
-							v-if="selection.length"
+							v-if="canMigrateSelected"
 							secondary
 							full-width
 							class="sidebar-btn"
+							:loading="migrateSelectedLoading"
 							@click="openMigrate('files')"
 						>
-							Migrate Selected ({{ selection.length }})
+							{{ migrateSelectedLabel }}
+							<template v-if="selection.length || folderSelection.length">
+								({{ selection.length + folderSelection.length }})
+							</template>
 						</v-button>
 						<v-button
-							v-if="mode === 'storage'"
+							v-if="canMigrateStorage"
 							full-width
 							class="sidebar-btn sidebar-btn-primary"
 							@click="openMigrate('storage')"
 						>
-							Migrate All on {{ storage }}
+							Migrate {{ storage }}
 						</v-button>
 						<v-button
-							v-else
+							v-else-if="canMigrateFolder"
 							full-width
 							class="sidebar-btn sidebar-btn-primary"
 							@click="openMigrate('folder')"
@@ -456,27 +1116,49 @@ function bindLayout(layoutState: Record<string, any>) {
 					v-if="mode === 'storage' && storageInfo"
 					id="storage-info"
 					icon="info"
-					title="Storage"
+					title="Storage Info"
 				>
 					<p class="sidebar-text storage-label">{{ storageInfo.label }}</p>
 					<usage-bar :usage="storageInfo" compact plain />
 				</sidebar-detail>
 
-				<sidebar-detail v-else id="folders-info" icon="info" title="Folders">
+				<sidebar-detail v-else id="directus-folders-info" icon="info" title="Directus Folders">
+					<p class="sidebar-text sidebar-note">{{ VIRTUAL_FOLDER_NOTE }}</p>
 					<p class="sidebar-text">
-						Browse virtual folders like the File Library. Migrate selected files or an entire folder between
-						storage adapters.
+						Use Move to relocate selected files across adapters, or Migrate an entire folder when
+						nothing is selected.
 					</p>
+					<v-notice v-if="multiStorageFolder" type="info" class="sidebar-multi-notice">
+						Files on {{ folderStorages.length }} storages:
+						<strong>{{ folderStorages.join(', ') }}</strong>
+					</v-notice>
+				</sidebar-detail>
+
+				<sidebar-detail
+					v-if="mode === 'storage'"
+					id="storage-settings"
+					icon="settings"
+					title="Storage Folder Strategy"
+				>
+					<storage-settings :location="storage" />
 				</sidebar-detail>
 			</template>
+
+			<upload-files-dialog
+				v-model="uploadDialogOpen"
+				:title="uploadDialogTitle"
+				:uploading="uploading"
+				@files="onUploadDialogFiles"
+			/>
 
 			<migrate-drawer
 				v-model="drawerOpen"
 				:storages="storages"
 				:source-storage="mode === 'storage' ? storage || null : null"
 				:selection-kind="selectionKind"
-				:file-ids="selection"
+				:file-ids="migrateSelectedIds.length ? migrateSelectedIds : selection"
 				:folder-id="mode === 'folders' ? folder ?? null : null"
+				:source-path="mode === 'storage' ? normalizedStoragePath || null : null"
 				:estimated-count="estimateCount"
 				:estimated-bytes="estimateBytes"
 				@done="onMigrated"
@@ -486,6 +1168,7 @@ function bindLayout(layoutState: Record<string, any>) {
 				v-if="mode === 'storage' && storage"
 				:model-value="importOpen"
 				:location="storage"
+				:storage-path="normalizedStoragePath || null"
 				@update:model-value="onDetectOpenChange"
 				@imported="onImported"
 			/>
@@ -494,10 +1177,6 @@ function bindLayout(layoutState: Record<string, any>) {
 </template>
 
 <style scoped>
-.upload-input {
-	display: none;
-}
-
 .drop-border {
 	position: fixed;
 	z-index: 500;
@@ -595,8 +1274,78 @@ function bindLayout(layoutState: Record<string, any>) {
 	line-height: 1.45;
 }
 
+.sidebar-note {
+	margin-block-end: 12px;
+	padding: 10px 12px;
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--theme--foreground);
+	background: var(--theme--background-normal);
+	border-radius: var(--theme--border-radius);
+	border: var(--theme--border-width) solid var(--theme--border-color-subdued);
+}
+
+.page {
+	padding: var(--content-padding);
+	padding-block-end: 0;
+	max-width: 1100px;
+}
+
+.page--flush-top {
+	padding-block-start: 0;
+}
+
+.section-divider {
+	margin-bottom: 12px;
+}
+
+.page-intro {
+	margin: 0 0 24px;
+	line-height: 1.55;
+	color: var(--theme--foreground);
+}
+
+.multi-storage-notice {
+	margin: 12px var(--content-padding, 16px) 0;
+}
+
+.sidebar-multi-notice {
+	margin-block-start: 12px;
+}
+
+.action-delete {
+	--v-button-background-color-hover: var(--theme--danger) !important;
+	--v-button-color-hover: var(--white, #fff) !important;
+}
+
 .storage-label {
 	margin-bottom: 10px;
 	font-weight: 600;
+}
+</style>
+
+<style>
+/* Injected on standard Directus cards when a folder spans multiple storages. */
+.layout-cards .header .storage-location-badge {
+	position: absolute;
+	inset-block-end: 8px;
+	inset-inline-start: 8px;
+	z-index: 2;
+	display: inline-flex;
+	align-items: center;
+	max-inline-size: calc(100% - 16px);
+	padding: 2px 8px;
+	overflow: hidden;
+	font-size: 11px;
+	font-weight: 600;
+	line-height: 1.35;
+	color: var(--theme--primary-foreground, var(--white, #fff));
+	white-space: nowrap;
+	text-overflow: ellipsis;
+	pointer-events: none;
+	background: var(--theme--primary);
+	border: none;
+	border-radius: var(--theme--border-radius);
+	box-shadow: 0 1px 3px rgb(38 50 56 / 0.2);
 }
 </style>

@@ -1,4 +1,5 @@
 import { Transform } from 'node:stream';
+import path from 'node:path';
 import {
 	diskDeleteWithAssets,
 	diskExists,
@@ -97,9 +98,11 @@ async function migrateRelatedAssets(
 
 	for (const name of related) {
 		try {
-			if (await diskExists(targetDisk, name)) continue;
+			// Always land transforms at the storage-root basename AssetsService expects.
+			const targetKey = path.posix.basename(name);
+			if (await diskExists(targetDisk, targetKey)) continue;
 			const stream = await diskRead(sourceDisk, name);
-			await diskWrite(targetDisk, name, stream, null);
+			await diskWrite(targetDisk, targetKey, stream, null);
 		} catch (err) {
 			logger?.warn?.(
 				`[storage-manager] Failed copying asset transform ${name}: ${err instanceof Error ? err.message : String(err)}`,

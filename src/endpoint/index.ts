@@ -7,7 +7,23 @@ import {
 	getLocationDriver,
 	listConfiguredLocations,
 } from './usage';
-import type { MigrateMode } from '../shared/types';
+import {
+	browseStorageFolders,
+	browseStorageFolderTree,
+	countStorageFolders,
+	createStorageFolder,
+	deleteStorageFolders,
+	ensureFileUnderPath,
+	joinStoragePath,
+	moveFilesToStoragePath,
+	moveStorageFolder,
+	normalizeStoragePath,
+	relocateStorageFolder,
+	renameStorageFolder,
+} from './physical-folders';
+import type { MigrateMode, StorageManagerSettings, StorageLocationSettings } from '../shared/types';
+import { STORAGE_MANAGER_FIELD, STORAGE_MANAGER_LOCATION_DEFAULTS } from '../shared/types';
+import { invalidateSettingsCache } from '../hook/settings';
 
 type EndpointContext = {
 	services: Record<string, any>;
@@ -62,6 +78,7 @@ async function resolveFileIds(
 	body: {
 		file_ids?: string[];
 		source_storage?: string;
+		source_path?: string;
 		folder_id?: string | null;
 		recursive?: boolean;
 	},
@@ -74,6 +91,20 @@ async function resolveFileIds(
 
 	if (body.source_storage) {
 		query.where('storage', String(body.source_storage));
+	}
+
+	const sourcePath = body.source_path != null ? normalizeStoragePath(String(body.source_path)) : '';
+	if (sourcePath) {
+		if (!body.source_storage) {
+			return [];
+		}
+		const prefix = `${sourcePath}/`;
+		if (body.recursive === false) {
+			// Immediate files only: under prefix, but not in nested subfolders.
+			query.where('filename_disk', 'like', `${prefix}%`).whereNot('filename_disk', 'like', `${prefix}%/%`);
+		} else {
+			query.where('filename_disk', 'like', `${prefix}%`);
+		}
 	}
 
 	if (body.folder_id !== undefined) {
@@ -154,7 +185,13 @@ export default {
 				if (!requireAdmin(req, res)) return;
 
 				const locations = listConfiguredLocations(env);
-				const storages = await Promise.all(locations.map((loc) => buildStorageLocationInfo(env, database, loc)));
+				const storages = await Promise.all(
+					locations.map(async (loc) => {
+						const info = await buildStorageLocationInfo(env, database, loc);
+						info.folder_count = await countStorageFolders(database, loc, env);
+						return info;
+					}),
+				);
 
 				res.json({ data: storages });
 			} catch (error) {
@@ -174,9 +211,221 @@ export default {
 				}
 
 				const info = await buildStorageLocationInfo(env, database, location);
+				info.folder_count = await countStorageFolders(database, location, env);
 				res.json({ data: info });
 			} catch (error) {
 				next(error);
+			}
+		});
+
+		/** Browse immediate storage folders under a path. */
+		router.get('/storages/:location/browse', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const location = String(req.params.location);
+				const locations = listConfiguredLocations(env);
+				if (!locations.includes(location)) {
+					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+					return;
+				}
+				const parentPath = normalizeStoragePath(String(req.query.path || ''));
+				const data = await browseStorageFolders(database, location, parentPath, env);
+				res.json({ data });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** Full nested folder tree for left-nav (parity with Directus Folders). */
+		router.get('/storages/:location/folder-tree', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const location = String(req.params.location);
+				const locations = listConfiguredLocations(env);
+				if (!locations.includes(location)) {
+					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+					return;
+				}
+				const data = await browseStorageFolderTree(database, location, env);
+				res.json({ data });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** Create a storage folder (local mkdir / cloud .keep). */
+		router.post('/storages/:location/folders', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const location = String(req.params.location);
+				const locations = listConfiguredLocations(env);
+				if (!locations.includes(location)) {
+					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+					return;
+				}
+				const body = (req.body || {}) as { name?: string; parent_path?: string };
+				const data = await createStorageFolder(
+					location,
+					String(body.name || ''),
+					String(body.parent_path || ''),
+					env,
+				);
+				res.json({ data });
+			} catch (error: any) {
+				if (error?.message && /required|Invalid|cannot contain/i.test(error.message)) {
+					res.status(400).json({ errors: [{ message: error.message }] });
+					return;
+				}
+				next(error);
+			}
+		});
+
+		/** Delete storage folders (move contents up, or delete all registered content). */
+		router.delete('/storages/:location/folders', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const location = String(req.params.location);
+				const locations = listConfiguredLocations(env);
+				if (!locations.includes(location)) {
+					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+					return;
+				}
+				const body = (req.body || {}) as { paths?: string[]; mode?: string };
+				const paths = Array.isArray(body.paths) ? body.paths.map(String) : [];
+				if (!paths.length) {
+					res.status(400).json({ errors: [{ message: 'Provide paths — at least one storage folder to delete' }] });
+					return;
+				}
+				const mode = body.mode === 'delete' ? 'delete' : 'move';
+				let filesService: { deleteMany: (keys: string[]) => Promise<unknown> } | undefined;
+				try {
+					const schema = await context.getSchema();
+					const FilesService = context.services.FilesService;
+					if (FilesService) {
+						filesService = new FilesService({
+							accountability: (req as any).accountability,
+							schema,
+						});
+					}
+				} catch {
+					filesService = undefined;
+				}
+				const data = await deleteStorageFolders(database, location, paths, env, logger, {
+					mode,
+					filesService,
+				});
+				res.json({ data });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** Rename or move a storage folder (path rewrite for all nested registered files). */
+		router.patch('/storages/:location/folders', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const location = String(req.params.location);
+				const locations = listConfiguredLocations(env);
+				if (!locations.includes(location)) {
+					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+					return;
+				}
+				const body = (req.body || {}) as { path?: string; name?: string; parent_path?: string };
+				const folderPath = String(body.path || '');
+				if (!folderPath) {
+					res.status(400).json({ errors: [{ message: 'Provide path — the storage folder to update' }] });
+					return;
+				}
+
+				const hasName = body.name !== undefined && body.name !== null;
+				const hasParent = Object.prototype.hasOwnProperty.call(body, 'parent_path');
+				if (!hasName && !hasParent) {
+					res.status(400).json({
+						errors: [{ message: 'Provide name (rename) and/or parent_path (move)' }],
+					});
+					return;
+				}
+
+				let data: { path: string; moved: number; failed: number };
+				if (hasName && hasParent) {
+					const name = String(body.name || '').trim();
+					const to = joinStoragePath(String(body.parent_path ?? ''), name);
+					data = await relocateStorageFolder(database, location, folderPath, to, env, logger);
+				} else if (hasName) {
+					data = await renameStorageFolder(database, location, folderPath, String(body.name || ''), env, logger);
+				} else {
+					data = await moveStorageFolder(
+						database,
+						location,
+						folderPath,
+						String(body.parent_path ?? ''),
+						env,
+						logger,
+					);
+				}
+				res.json({ data });
+			} catch (error: any) {
+				if (error?.message && /required|Invalid|cannot|already exists|Failed to relocate/i.test(error.message)) {
+					res.status(400).json({ errors: [{ message: error.message }] });
+					return;
+				}
+				next(error);
+			}
+		});
+
+		/** Move registered files into a storage folder path (same adapter). */
+		router.post('/storages/:location/move-files', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const location = String(req.params.location);
+				const locations = listConfiguredLocations(env);
+				if (!locations.includes(location)) {
+					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+					return;
+				}
+				const body = (req.body || {}) as { file_ids?: string[]; target_path?: string };
+				const fileIds = Array.isArray(body.file_ids) ? body.file_ids.map(String) : [];
+				if (!fileIds.length) {
+					res.status(400).json({ errors: [{ message: 'Provide file_ids' }] });
+					return;
+				}
+				const data = await moveFilesToStoragePath(
+					database,
+					location,
+					fileIds,
+					String(body.target_path ?? ''),
+					logger,
+				);
+				res.json({ data });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** Place an already-uploaded file under a storage path (post-upload rename). */
+		router.post('/storages/:location/place-file', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const location = String(req.params.location);
+				const locations = listConfiguredLocations(env);
+				if (!locations.includes(location)) {
+					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+					return;
+				}
+				const body = (req.body || {}) as { file_id?: string; target_path?: string };
+				if (!body.file_id) {
+					res.status(400).json({ errors: [{ message: 'Provide file_id' }] });
+					return;
+				}
+				const filename_disk = await ensureFileUnderPath(
+					database,
+					String(body.file_id),
+					location,
+					String(body.target_path || ''),
+				);
+				res.json({ data: { id: body.file_id, filename_disk } });
+			} catch (error: any) {
+				res.status(400).json({ errors: [{ message: error?.message || 'Place file failed' }] });
 			}
 		});
 
@@ -192,13 +441,15 @@ export default {
 					return;
 				}
 
-				const result = await detectOrphans(database, location, env);
+				const pathFilter = typeof req.query.path === 'string' ? req.query.path : '';
+				const result = await detectOrphans(database, location, env, pathFilter);
 				res.json({
 					data: result.orphans,
 					meta: {
 						scanned: result.scanned,
 						known: result.known,
 						orphan_count: result.orphans.length,
+						path: result.path || null,
 					},
 				});
 			} catch (error) {
@@ -218,11 +469,11 @@ export default {
 					return;
 				}
 
-				const body = (req.body || {}) as { filename_disks?: string[]; folder?: string | null };
+				const body = (req.body || {}) as { filename_disks?: string[]; folder?: string | null; path?: string };
 				let filenameDisks = Array.isArray(body.filename_disks) ? body.filename_disks.map(String) : [];
 
 				if (filenameDisks.length === 0) {
-					const detected = await detectOrphans(database, location, env);
+					const detected = await detectOrphans(database, location, env, body.path || '');
 					filenameDisks = detected.orphans.map((o) => o.filename_disk);
 				}
 
@@ -519,6 +770,7 @@ export default {
 					mode?: MigrateMode;
 					file_ids?: string[];
 					source_storage?: string;
+					source_path?: string;
 					folder_id?: string | null;
 					recursive?: boolean;
 					concurrency?: number;
@@ -631,6 +883,7 @@ export default {
 					mode?: MigrateMode;
 					file_ids?: string[];
 					source_storage?: string;
+					source_path?: string;
 					folder_id?: string | null;
 					recursive?: boolean;
 					concurrency?: number;
@@ -756,5 +1009,83 @@ export default {
 				}
 			}
 		});
+		// ── Settings ────────────────────────────────────────────────────────
+		/** GET /storage-manager/settings → returns full settings object. */
+		router.get('/settings', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const row = await database('directus_settings').select(STORAGE_MANAGER_FIELD).first();
+				const raw = row?.[STORAGE_MANAGER_FIELD];
+				const parsed: Partial<StorageManagerSettings> =
+					typeof raw === 'string' ? JSON.parse(raw) : (raw ?? {});
+				res.json({ data: { locations: parsed.locations ?? {} } });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** PATCH /storage-manager/settings → deep-merge and save. */
+		router.patch('/settings', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const body = req.body as { locations?: Record<string, Partial<StorageLocationSettings>> };
+				if (!body || typeof body.locations !== 'object') {
+					res.status(400).json({ errors: [{ message: 'Body must contain a "locations" object.' }] });
+					return;
+				}
+
+				// Load existing
+				const row = await database('directus_settings').select(STORAGE_MANAGER_FIELD).first();
+				const raw = row?.[STORAGE_MANAGER_FIELD];
+				const existing: StorageManagerSettings =
+					typeof raw === 'string' ? JSON.parse(raw) : (raw ?? { locations: {} });
+
+				// Merge: for each incoming location, deep-merge defaults → existing → incoming
+				const merged: Record<string, StorageLocationSettings> = { ...(existing.locations ?? {}) };
+				for (const [loc, partial] of Object.entries(body.locations)) {
+					merged[loc] = {
+						...STORAGE_MANAGER_LOCATION_DEFAULTS,
+						...(existing.locations?.[loc] ?? {}),
+						...partial,
+					};
+				}
+
+				const next_settings: StorageManagerSettings = {
+					locations: merged,
+					...(existing.name_mirror_claims !== undefined
+						? { name_mirror_claims: existing.name_mirror_claims }
+						: {}),
+				};
+				await database('directus_settings').update({ [STORAGE_MANAGER_FIELD]: JSON.stringify(next_settings) });
+				invalidateSettingsCache();
+
+				res.json({ data: { locations: next_settings.locations } });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** DELETE /storage-manager/settings/locations/:location → remove per-location settings. */
+		router.delete(
+			'/settings/locations/:location',
+			async (req: Request, res: Response, next: NextFunction) => {
+				try {
+					if (!requireAdmin(req, res)) return;
+					const loc = String(req.params.location);
+					const row = await database('directus_settings').select(STORAGE_MANAGER_FIELD).first();
+					const raw = row?.[STORAGE_MANAGER_FIELD];
+					const existing: StorageManagerSettings =
+						typeof raw === 'string' ? JSON.parse(raw) : (raw ?? { locations: {} });
+					delete existing.locations[loc];
+					await database('directus_settings').update({
+						[STORAGE_MANAGER_FIELD]: JSON.stringify(existing),
+					});
+					invalidateSettingsCache();
+					res.json({ data: existing });
+				} catch (error) {
+					next(error);
+				}
+			},
+		);
 	},
 };

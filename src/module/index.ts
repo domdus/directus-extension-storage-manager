@@ -3,6 +3,7 @@ import { userHasAdminAccess } from '../shared/admin';
 import OverviewView from './overview-view.vue';
 import StorageView from './storage-view.vue';
 import FoldersView from './folders-view.vue';
+import SettingsView from './settings-view.vue';
 
 export default defineModule({
 	id: 'storage-manager',
@@ -18,12 +19,20 @@ export default defineModule({
 			component: StorageView,
 		},
 		{
+			path: 'storage/:location/path/:storagePath(.*)',
+			component: StorageView,
+		},
+		{
 			path: 'folders',
 			component: FoldersView,
 		},
 		{
 			path: 'folders/:folderId',
 			component: FoldersView,
+		},
+		{
+			path: 'settings',
+			component: SettingsView,
 		},
 	],
 	preRegisterCheck(user) {

@@ -137,8 +137,18 @@ export async function detectOrphans(
 	database: any,
 	location: string,
 	env?: Record<string, unknown>,
-): Promise<{ orphans: OrphanFile[]; scanned: number; known: number }> {
-	const onDisk = await listDiskFilenames(location, env);
+	pathPrefix?: string | null,
+): Promise<{ orphans: OrphanFile[]; scanned: number; known: number; path: string }> {
+	const prefix = String(pathPrefix || '')
+		.replace(/\\/g, '/')
+		.replace(/^\/+|\/+$/g, '')
+		.replace(/\/+/g, '/');
+
+	const onDiskAll = await listDiskFilenames(location, env);
+	const onDisk = prefix
+		? onDiskAll.filter((name) => name === prefix || name.startsWith(`${prefix}/`))
+		: onDiskAll;
+
 	const rows = await database('directus_files').select('filename_disk').where('storage', location);
 	const known = new Set(
 		rows.map((r: { filename_disk: string | null }) => String(r.filename_disk || '')).filter(Boolean),
@@ -171,7 +181,7 @@ export async function detectOrphans(
 
 	orphans.sort((a, b) => a.filename_disk.localeCompare(b.filename_disk));
 
-	return { orphans, scanned: onDisk.length, known: known.size };
+	return { orphans, scanned: onDisk.length, known: known.size, path: prefix };
 }
 
 export type ImportOrphanResult = {

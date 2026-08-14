@@ -18,6 +18,7 @@ type MigratePayload = {
 	mode: MigrateMode;
 	file_ids?: string[];
 	source_storage?: string;
+	source_path?: string;
 	folder_id?: string | null;
 	recursive?: boolean;
 	concurrency?: number;

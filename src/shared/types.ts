@@ -20,6 +20,8 @@ export type StorageLocationInfo = StorageUsage & {
 	icon: string;
 	root: string | null;
 	bucket: string | null;
+	/** Physical storage folders discovered under this adapter. */
+	folder_count: number;
 };
 
 export type FileRow = {
@@ -51,6 +53,8 @@ export type MigrateRequest = {
 	file_ids?: string[];
 	/** Migrate all files currently on this source storage. */
 	source_storage?: string;
+	/** With source_storage: limit to files under this physical path prefix. */
+	source_path?: string;
 	/** Migrate files in this folder (optionally recursive). */
 	folder_id?: string | null;
 	recursive?: boolean;
@@ -84,6 +88,71 @@ export type MigrateResponse = {
 	/** True when the user aborted the job (not a hard failure). */
 	cancelled?: boolean;
 };
+
+// ── Storage Manager Settings (stored in directus_settings.storage_manager) ──
+
+export type PrefixStrategy = 'none' | 'folder' | 'folder_id' | 'type' | 'date';
+
+export type FolderSyncRenameStrategy = 'full_sync' | 'leave_old';
+/** When Sync Folder Changes is on, deleted virtual folders relocate storage paths up to the parent (never delete files). */
+export type FolderSyncDeleteStrategy = 'move_to_parent';
+
+export type StorageLocationSettings = {
+	prefix_strategy: PrefixStrategy;
+	/** Meaningful when prefix_strategy is 'folder' or 'folder_id'. */
+	folder_sync_enabled: boolean;
+	/** Only meaningful for 'folder' (by name) — IDs do not change on rename. */
+	folder_sync_rename: FolderSyncRenameStrategy;
+	/** Always relocate-to-parent when sync is enabled; kept for settings shape / legacy coerce. */
+	folder_sync_delete: FolderSyncDeleteStrategy;
+	/** Mime-category → prefix path for 'type' strategy. */
+	type_map: Record<string, string>;
+	/** date-fns format string for 'date' strategy, e.g. "yyyy/MM" */
+	date_format: string;
+};
+
+export type StorageManagerSettings = {
+	locations: Record<string, StorageLocationSettings>;
+	/**
+	 * Sticky first-wins for Mirror by Name collisions.
+	 * Key: `${parent ?? ''}::${name}` → folder id that owns the plain name segment.
+	 * Absent (`undefined`) means claims have never been initialized (legacy bootstrap once).
+	 */
+	name_mirror_claims?: Record<string, string>;
+};
+
+export const STORAGE_MANAGER_FIELD = 'storage_manager';
+
+/** Marker object written on cloud adapters so empty storage folders survive. */
+export const STORAGE_FOLDER_KEEP = '.keep';
+
+export type StorageBrowseFolder = {
+	name: string;
+	path: string;
+};
+
+export type StorageBrowseResponse = {
+	path: string;
+	folders: StorageBrowseFolder[];
+};
+
+/** Nested physical folder node for left-nav tree (and similar UIs). */
+export type StorageFolderNode = {
+	name: string;
+	path: string;
+	children?: StorageFolderNode[];
+};
+
+export const STORAGE_MANAGER_LOCATION_DEFAULTS: StorageLocationSettings = {
+	prefix_strategy: 'none',
+	folder_sync_enabled: false,
+	folder_sync_rename: 'full_sync',
+	folder_sync_delete: 'move_to_parent',
+	type_map: { image: 'images', video: 'videos', audio: 'audio', text: 'documents' },
+	date_format: 'yyyy/MM',
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /** Server → client progress events (SSE `/migrate/stream`). */
 export type MigrateProgressEvent =

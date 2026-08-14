@@ -190,23 +190,55 @@ export async function* diskList(disk: StorageDisk, prefix = ''): AsyncGenerator<
 }
 
 /**
- * Directus transform siblings: `{stem}__{hash}.ext` next to the original on the same adapter.
- * @see AssetsService getAssetSuffix
+ * Directus AssetsService transform files:
+ * `{basename(stem)}__{objectHash}.{ext}` stored at the **storage root** (not under folder prefixes).
+ * @see api/src/services/assets.ts getAssetSuffix
+ *
+ * Nested originals may also have orphaned copies beside the file if an older move
+ * incorrectly relocated them — those are "colocated" transforms.
  */
 const ASSET_TRANSFORM_BASENAME_RE = /__[a-f0-9]{16,}(?:\.[^.]+)?$/i;
 
-/** List generated asset variants stored beside `filenameDisk` (requires driver `.list()`). */
-export async function diskListRelatedAssets(disk: StorageDisk, filenameDisk: string): Promise<string[]> {
+function posixFileParts(filenameDisk: string): { dir: string; stem: string } {
+	const normalized = String(filenameDisk || '')
+		.replace(/\\/g, '/')
+		.replace(/^\/+/, '');
+	const parsed = path.posix.parse(normalized);
+	return { dir: parsed.dir, stem: parsed.name };
+}
+
+function isTransformBasename(base: string, stem: string): boolean {
+	return base.startsWith(`${stem}__`) && ASSET_TRANSFORM_BASENAME_RE.test(base);
+}
+
+/** Canonical transforms at storage root (`uuid__hash.ext`) — what AssetsService reads/writes. */
+export async function diskListCanonicalAssets(disk: StorageDisk, filenameDisk: string): Promise<string[]> {
 	if (typeof disk.list !== 'function') return [];
 
-	const stem = path.parse(filenameDisk).name;
-	const marker = `${stem}__`;
+	const { stem } = posixFileParts(filenameDisk);
 	const related: string[] = [];
 
 	for await (const filepath of disk.list(stem)) {
 		const name = String(filepath || '').replace(/^[/\\]+/, '');
-		const base = path.basename(name);
-		if (base.startsWith(marker) && ASSET_TRANSFORM_BASENAME_RE.test(base)) {
+		if (name.includes('/')) continue;
+		if (isTransformBasename(name, stem)) related.push(name);
+	}
+
+	return related;
+}
+
+/** Transforms sitting in the same directory as a nested original (orphans / legacy moves). */
+export async function diskListColocatedAssets(disk: StorageDisk, filenameDisk: string): Promise<string[]> {
+	if (typeof disk.list !== 'function') return [];
+
+	const { dir, stem } = posixFileParts(filenameDisk);
+	if (!dir) return [];
+
+	const related: string[] = [];
+	for await (const filepath of disk.list(`${dir}/${stem}`)) {
+		const name = String(filepath || '').replace(/^[/\\]+/, '');
+		const base = path.posix.basename(name);
+		if (path.posix.dirname(name) === dir && isTransformBasename(base, stem)) {
 			related.push(name);
 		}
 	}
@@ -214,21 +246,27 @@ export async function diskListRelatedAssets(disk: StorageDisk, filenameDisk: str
 	return related;
 }
 
-/** Delete primary object plus any generated asset variants sharing the file prefix. */
-export async function diskDeleteWithAssets(disk: StorageDisk, filenameDisk: string): Promise<void> {
-	const parsed = path.parse(filenameDisk);
-	const prefix = parsed.name;
+/** Canonical root transforms + colocated orphans (for cross-adapter migrate). */
+export async function diskListRelatedAssets(disk: StorageDisk, filenameDisk: string): Promise<string[]> {
+	const canonical = await diskListCanonicalAssets(disk, filenameDisk);
+	const colocated = await diskListColocatedAssets(disk, filenameDisk);
+	return [...new Set([...canonical, ...colocated])];
+}
 
-	if (typeof disk.list === 'function') {
-		for await (const filepath of disk.list(prefix)) {
-			try {
-				await diskDelete(disk, filepath);
-			} catch {
-				// best-effort cleanup
-			}
+/** Delete primary object plus canonical and colocated transform variants. */
+export async function diskDeleteWithAssets(disk: StorageDisk, filenameDisk: string): Promise<void> {
+	const related = await diskListRelatedAssets(disk, filenameDisk);
+	for (const name of related) {
+		try {
+			await diskDelete(disk, name);
+		} catch {
+			// best-effort
 		}
-		return;
 	}
 
-	await diskDelete(disk, filenameDisk);
+	try {
+		await diskDelete(disk, filenameDisk);
+	} catch {
+		// best-effort
+	}
 }

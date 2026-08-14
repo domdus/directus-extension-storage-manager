@@ -1,7 +1,7 @@
 <template>
 	<v-drawer
 		:model-value="modelValue"
-		:title="`Detect Files on ${location}`"
+		:title="drawerTitle"
 		icon="folder_off"
 		@update:model-value="$emit('update:modelValue', $event)"
 		@cancel="close"
@@ -33,7 +33,13 @@
 
 		<div class="body">
 			<p class="intro">
-				Finds files on <strong>{{ location }}</strong> that aren’t registered in Directus yet.
+				<template v-if="scopedPath">
+					Finds files under <strong>{{ scopedPath }}</strong> on
+					<strong>{{ location }}</strong> that aren’t registered in Directus yet.
+				</template>
+				<template v-else>
+					Finds files on <strong>{{ location }}</strong> that aren’t registered in Directus yet.
+				</template>
 				Import only creates database rows — nothing is copied. Titles come from the filename
 				(underscores become spaces). You can delete selected unknown files from storage.
 				Generated thumbnails are excluded.
@@ -42,7 +48,7 @@
 			<div class="toolbar">
 				<v-button secondary :loading="scanning" :disabled="deleting" @click="scan">
 					<v-icon name="radar" left />
-					Scan Storage
+					{{ scopedPath ? 'Scan Folder' : 'Scan Storage' }}
 				</v-button>
 				<v-button
 					:disabled="!orphans.length || importing || scanning || deleting"
@@ -76,7 +82,12 @@
 			<p v-else-if="error" class="error">{{ error }}</p>
 
 			<p v-else-if="scannedOnce && !orphans.length" class="empty">
-				No unknown files on this storage. Everything here is already in the database.
+				<template v-if="scopedPath">
+					No unknown files in this folder. Everything here is already in the database.
+				</template>
+				<template v-else>
+					No unknown files on this storage. Everything here is already in the database.
+				</template>
 			</p>
 
 			<div v-else-if="orphans.length" class="table-wrap">
@@ -181,6 +192,8 @@ type OrphanRow = {
 const props = defineProps<{
 	modelValue: boolean;
 	location: string;
+	/** When set, scan only under this physical storage path (and its subfolders). */
+	storagePath?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -199,9 +212,21 @@ const scannedOnce = ref(false);
 const error = ref<string | null>(null);
 const orphans = ref<OrphanRow[]>([]);
 const selected = ref<string[]>([]);
-const meta = ref<{ scanned: number; known: number; orphan_count: number } | null>(null);
+const meta = ref<{ scanned: number; known: number; orphan_count: number; path?: string | null } | null>(null);
 const lastResult = ref<{ imported: number; skipped: number; failed: number } | null>(null);
 const lastDeleteResult = ref<{ deleted: number; skipped: number; failed: number } | null>(null);
+
+const scopedPath = computed(() => {
+	const path = String(props.storagePath || '')
+		.replace(/\\/g, '/')
+		.replace(/^\/+|\/+$/g, '')
+		.replace(/\/+/g, '/');
+	return path || '';
+});
+
+const drawerTitle = computed(() =>
+	scopedPath.value ? 'Detect Files in this Folder' : `Detect Files on ${props.location}`,
+);
 
 const allSelected = computed(
 	() => orphans.value.length > 0 && selected.value.length === orphans.value.length,
@@ -256,7 +281,9 @@ async function scan() {
 	scanning.value = true;
 	error.value = null;
 	try {
-		const res = await api.get(`/storage-manager/storages/${encodeURIComponent(props.location)}/orphans`);
+		const res = await api.get(`/storage-manager/storages/${encodeURIComponent(props.location)}/orphans`, {
+			params: scopedPath.value ? { path: scopedPath.value } : undefined,
+		});
 		orphans.value = (res.data?.data || []) as OrphanRow[];
 		meta.value = res.data?.meta || null;
 		scannedOnce.value = true;
