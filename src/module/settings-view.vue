@@ -9,7 +9,7 @@
 		</template>
 
 		<template #sidebar>
-			<sidebar-detail icon="info" title="About" close>
+			<sidebar-detail id="about" icon="info" title="About">
 				<p class="sidebar-text">
 					Export or import this extension’s JSON config, or remove the dedicated settings field before
 					uninstalling.

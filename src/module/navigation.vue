@@ -148,6 +148,22 @@ function setOpenStorageFolders() {
 			</v-list-item>
 		</template>
 
+		<div class="section-label">Storage adapters</div>
+
+		<div class="storages">
+			<v-item-group v-model="openStorageFolders" scope="storage-navigation" multiple>
+				<nav-storage-item
+					v-for="storage in storages"
+					:key="storage.location"
+					:storage="storage"
+					:folders="trees[storage.location] || []"
+					:current-location="currentStorage"
+					:current-path="currentStoragePath"
+					:click-handler="onStorageClick"
+				/>
+			</v-item-group>
+		</div>
+
 		<div class="folders">
 			<v-item-group v-model="openFolders" scope="files-navigation" multiple>
 				<v-list-group
@@ -179,26 +195,6 @@ function setOpenStorageFolders() {
 				</v-list-group>
 			</v-item-group>
 		</div>
-
-		<v-divider />
-
-		<div class="section-label">Storage adapters</div>
-
-		<div class="storages">
-			<v-item-group v-model="openStorageFolders" scope="storage-navigation" multiple>
-				<nav-storage-item
-					v-for="storage in storages"
-					:key="storage.location"
-					:storage="storage"
-					:folders="trees[storage.location] || []"
-					:current-location="currentStorage"
-					:current-path="currentStoragePath"
-					:click-handler="onStorageClick"
-				/>
-			</v-item-group>
-		</div>
-
-		<v-divider />
 
 		<v-list-item clickable :active="isSettings" @click="goSettings">
 			<v-list-item-icon>
