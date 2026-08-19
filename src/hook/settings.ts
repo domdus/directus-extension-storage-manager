@@ -23,20 +23,42 @@ function normalizeNameMirrorClaims(raw: unknown): Record<string, string> {
 	return out;
 }
 
+function emptySettings(): StorageManagerSettings {
+	return { locations: {} };
+}
+
+function isMissingColumnError(err: unknown): boolean {
+	const message = String((err as { message?: string })?.message || err || '');
+	return /does not exist|unknown column|no such column/i.test(message);
+}
+
 export async function loadSettings(database: any): Promise<StorageManagerSettings> {
 	if (settingsCache) return settingsCache;
-	const row = await database('directus_settings').select(STORAGE_MANAGER_FIELD).first();
-	const raw = row?.[STORAGE_MANAGER_FIELD];
-	const parsed: Partial<StorageManagerSettings> =
-		typeof raw === 'string' ? JSON.parse(raw) : (raw ?? {});
-	const result: StorageManagerSettings = {
-		locations: parsed.locations ?? {},
-	};
-	if (parsed && typeof parsed === 'object' && 'name_mirror_claims' in parsed) {
-		result.name_mirror_claims = normalizeNameMirrorClaims(parsed.name_mirror_claims);
+	try {
+		const hasColumn = await database.schema.hasColumn('directus_settings', STORAGE_MANAGER_FIELD);
+		if (!hasColumn) {
+			settingsCache = emptySettings();
+			return settingsCache;
+		}
+		const row = await database('directus_settings').select(STORAGE_MANAGER_FIELD).first();
+		const raw = row?.[STORAGE_MANAGER_FIELD];
+		const parsed: Partial<StorageManagerSettings> =
+			typeof raw === 'string' ? JSON.parse(raw) : (raw ?? {});
+		const result: StorageManagerSettings = {
+			locations: parsed.locations ?? {},
+		};
+		if (parsed && typeof parsed === 'object' && 'name_mirror_claims' in parsed) {
+			result.name_mirror_claims = normalizeNameMirrorClaims(parsed.name_mirror_claims);
+		}
+		settingsCache = result;
+		return settingsCache;
+	} catch (err) {
+		if (isMissingColumnError(err)) {
+			settingsCache = emptySettings();
+			return settingsCache;
+		}
+		throw err;
 	}
-	settingsCache = result;
-	return settingsCache;
 }
 
 export async function saveSettings(database: any, settings: StorageManagerSettings): Promise<void> {
@@ -57,8 +79,9 @@ export function getLocationSettings(
 }
 
 /**
- * Auto-create the `directus_settings.storage_manager` JSON field on server start.
- * Safe to call on every startup — no-ops if the field already exists.
+ * Create `directus_settings.storage_manager` if missing.
+ * Called on server start and on the first Storage Manager API request (Marketplace
+ * install does not restart Directus, so server.start has already run).
  */
 export async function ensureSettingsField(
 	database: any,
@@ -71,9 +94,14 @@ export async function ensureSettingsField(
 		if (hasColumn) return;
 
 		const schema = await getSchema();
-		const fieldsService = new services.FieldsService({ database, schema, accountability: null });
+		const fieldsService = new services.FieldsService({
+			database,
+			schema,
+			accountability: { admin: true },
+		});
 		const existingFields = await fieldsService.readAll('directus_settings');
-		if (existingFields?.some((f: any) => f.field === STORAGE_MANAGER_FIELD)) return;
+		const alreadyRegistered = existingFields?.some((f: any) => f.field === STORAGE_MANAGER_FIELD);
+		if (alreadyRegistered && hasColumn) return;
 
 		await fieldsService.createField('directus_settings', {
 			field: STORAGE_MANAGER_FIELD,
@@ -81,12 +109,14 @@ export async function ensureSettingsField(
 			meta: {
 				collection: 'directus_settings',
 				field: STORAGE_MANAGER_FIELD,
+				special: ['cast-json'],
 				interface: 'input-code',
 				hidden: true,
 				note: 'Storage Manager extension settings (do not edit manually)',
 			},
 			schema: null,
 		});
+		invalidateSettingsCache();
 		logger.info(`[storage-manager] Created directus_settings.${STORAGE_MANAGER_FIELD}`);
 	} catch (err: any) {
 		logger.warn(`[storage-manager] Could not ensure settings field: ${err?.message}`);

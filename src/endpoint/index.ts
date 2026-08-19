@@ -28,7 +28,7 @@ import {
 } from './physical-folders';
 import type { MigrateMode, StorageManagerSettings, StorageLocationSettings } from '../shared/types';
 import { STORAGE_MANAGER_FIELD, STORAGE_MANAGER_LOCATION_DEFAULTS } from '../shared/types';
-import { getLocationSettings, invalidateSettingsCache, loadSettings } from '../hook/settings';
+import { ensureSettingsField, getLocationSettings, invalidateSettingsCache, loadSettings } from '../hook/settings';
 import { isDirectusFolderMirrorEnabled } from '../hook/prefix';
 import { materializeDryRun, materializeRun } from './materialize';
 import { checkForUpdates } from './update-check';
@@ -186,7 +186,16 @@ function applySimpleFilter(qb: any, filter: Record<string, unknown> | null) {
 export default {
 	id: 'storage-manager',
 	handler: (router: Router, context: EndpointContext) => {
-		const { database, env, logger } = context;
+		const { database, env, logger, services, getSchema } = context;
+
+		router.use(async (_req: Request, _res: Response, next: NextFunction) => {
+			try {
+				await ensureSettingsField(database, services, getSchema, logger);
+				next();
+			} catch (error) {
+				next(error);
+			}
+		});
 
 		router.get('/storages', async (req: Request, res: Response, next: NextFunction) => {
 			try {
@@ -1367,11 +1376,8 @@ export default {
 		router.get('/settings', async (req: Request, res: Response, next: NextFunction) => {
 			try {
 				if (!requireAdmin(req, res)) return;
-				const row = await database('directus_settings').select(STORAGE_MANAGER_FIELD).first();
-				const raw = row?.[STORAGE_MANAGER_FIELD];
-				const parsed: Partial<StorageManagerSettings> =
-					typeof raw === 'string' ? JSON.parse(raw) : (raw ?? {});
-				res.json({ data: { locations: parsed.locations ?? {} } });
+				const settings = await loadSettings(database);
+				res.json({ data: { locations: settings.locations ?? {} } });
 			} catch (error) {
 				next(error);
 			}
