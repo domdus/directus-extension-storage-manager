@@ -27,6 +27,11 @@ export function isMirrorStrategy(strategy: PrefixStrategy): boolean {
 	return isNameMirrorStrategy(strategy) || isIdMirrorStrategy(strategy);
 }
 
+/** Single on/off for Mirror Directus Folders (by-name or leftover by-UID). */
+export function isDirectusFolderMirrorEnabled(settings: StorageLocationSettings): boolean {
+	return isMirrorStrategy(settings.prefix_strategy);
+}
+
 /**
  * By-name mirror segment for one folder.
  * Alone among siblings → plain `name`.

@@ -16,6 +16,7 @@ const storagesError = ref<string | null>(null);
 type MigratePayload = {
 	target_storage: string;
 	mode: MigrateMode;
+	keep_source_file_on_disk?: boolean;
 	file_ids?: string[];
 	source_storage?: string;
 	source_path?: string;

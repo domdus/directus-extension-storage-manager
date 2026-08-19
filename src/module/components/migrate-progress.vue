@@ -102,7 +102,7 @@ const percent = computed(() => {
 const percentRounded = computed(() => Math.round(percent.value));
 
 const statusLabel = computed(() => {
-	if (!props.isDone) return 'Transferring';
+	if (!props.isDone) return 'Moving';
 	if (props.isCancelled) return 'Cancelled';
 	if (props.failed > 0) return 'Completed with errors';
 	return 'Completed';

@@ -5,7 +5,7 @@ import {
 	invalidateSettingsCache,
 	loadSettings,
 } from './settings';
-import { buildPrefix, isMirrorStrategy, isNameMirrorStrategy } from './prefix';
+import { buildPrefix, isDirectusFolderMirrorEnabled, isNameMirrorStrategy } from './prefix';
 import {
 	captureFolderDeletePaths,
 	captureFolderRenamePathSnapshot,
@@ -20,6 +20,7 @@ import {
 	onFolderDeletedForClaims,
 	onFolderRenamedForClaims,
 } from './name-mirror-claims';
+import { captureNestedFilesForDelete, deleteNestedFileObjects } from './nested-file-delete';
 import { STORAGE_MANAGER_FIELD } from '../shared/types';
 
 export default defineHook(({ filter, action }, { database, env, services, getSchema, logger }) => {
@@ -36,7 +37,7 @@ export default defineHook(({ filter, action }, { database, env, services, getSch
 		return payload;
 	});
 
-	// ── Prefix injection on file upload ────────────────────────────────────
+	// ── Prefix injection on file upload (Mirror Directus Folders) ──────────
 	filter('files.create', async (input: Record<string, any>) => {
 		try {
 			const envLocations = String(env['STORAGE_LOCATIONS'] ?? 'local')
@@ -48,13 +49,13 @@ export default defineHook(({ filter, action }, { database, env, services, getSch
 			const settings = await loadSettings(database);
 			const locSettings = getLocationSettings(settings, location);
 
-			if (locSettings.prefix_strategy === 'none') return input;
+			if (!isDirectusFolderMirrorEnabled(locSettings)) return input;
 
 			const prefix = await buildPrefix(locSettings, input, database);
 			if (!prefix) return input;
 
 			const current: string = String(input.filename_disk ?? '');
-			if (!current.startsWith(prefix + '/')) {
+			if (!current.startsWith(`${prefix}/`)) {
 				input.filename_disk = `${prefix}/${current}`;
 			}
 		} catch (err: any) {
@@ -75,7 +76,7 @@ export default defineHook(({ filter, action }, { database, env, services, getSch
 		}
 	});
 
-	// ── Folder sync: rename (by-name mirror only, includes collision reshuffles) ──
+	// ── Folder sync: rename (by-name mirror, includes collision reshuffles) ──
 	const pendingRenames = new Map<string, Record<string, string>>(); // folderId → id→oldPath
 	const pendingRenameClaims = new Map<
 		string,
@@ -87,19 +88,13 @@ export default defineHook(({ filter, action }, { database, env, services, getSch
 		try {
 			const settings = await loadSettings(database);
 			const hasSyncLocation = Object.values(settings.locations).some(
-				(s) =>
-					s.folder_sync_enabled &&
-					isNameMirrorStrategy(s.prefix_strategy) &&
-					s.folder_sync_rename === 'full_sync',
+				(s) => isDirectusFolderMirrorEnabled(s) && isNameMirrorStrategy(s.prefix_strategy),
 			);
 
 			const keys = meta.keys ?? (meta.key ? [meta.key] : []);
 			const newName = String(payload.name);
 			for (const key of keys) {
-				const row = await database('directus_folders')
-					.select('name', 'parent')
-					.where('id', key)
-					.first();
+				const row = await database('directus_folders').select('name', 'parent').where('id', key).first();
 				if (row) {
 					pendingRenameClaims.set(key, {
 						oldName: String(row.name),
@@ -154,21 +149,17 @@ export default defineHook(({ filter, action }, { database, env, services, getSch
 		string,
 		{ folderPaths: Record<string, string>; parentPaths: Record<string, string> }
 	>();
-	const pendingDeleteSiblings = new Map<string, Record<string, string>>(); // folderId → siblingId → oldPath
+	const pendingDeleteSiblings = new Map<string, Record<string, string>>();
 	const pendingDeleteClaims = new Map<string, { parent: string | null; name: string }>();
 
 	filter('folders.delete', async (keys: string[]) => {
 		try {
 			const settings = await loadSettings(database);
-			const hasSyncLocation = Object.values(settings.locations).some(
-				(s) => s.folder_sync_enabled && isMirrorStrategy(s.prefix_strategy),
+			const hasSyncLocation = Object.values(settings.locations).some((s) =>
+				isDirectusFolderMirrorEnabled(s),
 			);
-
 			const hasRenameSync = Object.values(settings.locations).some(
-				(s) =>
-					s.folder_sync_enabled &&
-					isNameMirrorStrategy(s.prefix_strategy) &&
-					s.folder_sync_rename === 'full_sync',
+				(s) => isDirectusFolderMirrorEnabled(s) && isNameMirrorStrategy(s.prefix_strategy),
 			);
 
 			for (const key of keys) {
@@ -227,6 +218,39 @@ export default defineHook(({ filter, action }, { database, env, services, getSch
 			}
 		} catch (err: any) {
 			logger.error(`[storage-manager] Folder delete sync error: ${err?.message}`);
+		}
+	});
+
+	// Directus only removes root-level basename matches (thumbnails). Nested
+	// filename_disk originals would otherwise remain on disk after a Studio delete.
+	const pendingNestedFileDeletes = new Map<string, { storage: string; filename_disk: string }>();
+
+	filter('files.delete', async (keys: string[]) => {
+		try {
+			const nested = await captureNestedFilesForDelete(database, keys);
+			for (const file of nested) {
+				pendingNestedFileDeletes.set(file.id, file);
+			}
+		} catch (err: any) {
+			logger.warn(`[storage-manager] Nested file delete pre-capture failed: ${err?.message}`);
+		}
+		return keys;
+	});
+
+	action('files.delete', async (meta: { keys?: string[] }) => {
+		const keys = (meta.keys ?? []).map(String);
+		const leftover = [];
+		for (const id of keys) {
+			const file = pendingNestedFileDeletes.get(id);
+			if (!file) continue;
+			pendingNestedFileDeletes.delete(id);
+			leftover.push(file);
+		}
+		if (!leftover.length) return;
+		try {
+			await deleteNestedFileObjects(leftover, logger);
+		} catch (err: any) {
+			logger.warn(`[storage-manager] Nested file leftover cleanup failed: ${err?.message}`);
 		}
 	});
 });

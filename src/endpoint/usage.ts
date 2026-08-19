@@ -143,5 +143,6 @@ export async function buildStorageLocationInfo(
 		root: getLocationRoot(env, location),
 		bucket: getLocationBucket(env, location),
 		folder_count: 0,
+		mirror_directus_folders: false,
 	};
 }

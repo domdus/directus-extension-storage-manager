@@ -1,97 +1,67 @@
 <template>
 	<!--
-		Fragment of cards — must be direct children of layout-cards `.grid`
-		(same as File Library FolderSection + Card), not a nested grid wrapper.
+		Fragment of cards for Directus virtual folders — same grid pattern as
+		File Library FolderSection / storage-folder-section.
 	-->
 	<div
 		v-for="folder in folders"
-		:key="folder.path"
+		:key="folder.id"
 		class="card folder-card"
 		:class="{
-			selected: selection.includes(folder.path),
+			selected: selection.includes(folder.id),
 			'select-mode': selectMode,
 		}"
 		tabindex="0"
 		@click="onCardClick(folder)"
 		@keydown.self.enter.prevent="onCardClick(folder)"
 		@keydown.self.space.prevent="onCardClick(folder)"
-		@contextmenu.prevent="onContextMenu($event, folder.path)"
 	>
-		<v-icon class="selector" :name="selectionIcon(folder.path)" clickable @click.stop="toggle(folder.path)" />
+		<v-icon class="selector" :name="selectionIcon(folder.id)" clickable @click.stop="toggle(folder.id)" />
 		<div class="header">
 			<div class="selection-fade" />
-			<v-icon large name="folder" />
+			<v-icon large name="folder" outline />
 		</div>
 		<div class="title">{{ folder.name }}</div>
-
-		<storage-folder-context-menu
-			:ref="(el) => setMenuRef(folder.path, el)"
-			:location="location"
-			:path="folder.path"
-			:name="folder.name"
-			@changed="onChanged"
-		/>
 	</div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { useRouter } from 'vue-router';
-import type { StorageBrowseFolder } from '../../shared/types';
-import { storageManagerPath } from '../../shared/storage-path-url';
-import StorageFolderContextMenu from './storage-folder-context-menu.vue';
+import type { FolderRaw } from '../composables/use-folders';
 
 const props = defineProps<{
-	location: string;
-	folders: StorageBrowseFolder[];
+	folders: FolderRaw[];
 	anyFileSelection?: boolean;
-}>();
-
-const emit = defineEmits<{
-	(e: 'changed'): void;
 }>();
 
 const selection = defineModel<string[]>('selection', { default: () => [] });
 const router = useRouter();
 
-const menuRefs = ref<Record<string, { open: (event: MouseEvent) => void } | null>>({});
-
 const selectMode = computed(() => selection.value.length > 0 || (props.anyFileSelection ?? false));
 
-function setMenuRef(path: string, el: unknown) {
-	menuRefs.value[path] = el as { open: (event: MouseEvent) => void } | null;
+function selectionIcon(id: string) {
+	return selection.value.includes(id) ? 'check_circle' : 'radio_button_unchecked';
 }
 
-function selectionIcon(path: string) {
-	return selection.value.includes(path) ? 'check_circle' : 'radio_button_unchecked';
+function openFolder(id: string) {
+	router.push(`/storage-manager/folders/${id}`);
 }
 
-function openFolder(path: string) {
-	router.push(storageManagerPath(props.location, path));
-}
-
-function toggle(path: string) {
-	if (selection.value.includes(path)) {
-		selection.value = selection.value.filter((p) => p !== path);
+function toggle(id: string) {
+	if (selection.value.includes(id)) {
+		selection.value = selection.value.filter((value) => value !== id);
 	} else {
-		selection.value = [...selection.value, path];
+		selection.value = [...selection.value, id];
 	}
 }
 
-function onCardClick(folder: StorageBrowseFolder) {
+function onCardClick(folder: FolderRaw) {
 	if (selectMode.value) {
-		toggle(folder.path);
+		toggle(folder.id);
 		return;
 	}
-	openFolder(folder.path);
-}
-
-function onContextMenu(event: MouseEvent, path: string) {
-	menuRefs.value[path]?.open(event);
-}
-
-function onChanged() {
-	emit('changed');
+	openFolder(folder.id);
 }
 </script>
 
@@ -245,6 +215,7 @@ function onChanged() {
 	block-size: 1.4375rem;
 	margin-block-start: 0.125rem;
 	overflow: hidden;
+	font-weight: 600;
 	line-height: 1.3;
 	white-space: nowrap;
 	text-overflow: ellipsis;

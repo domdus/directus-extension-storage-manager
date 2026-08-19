@@ -5,7 +5,7 @@ import {
 	buildFolderPathById,
 	findSiblingIdsByName,
 	isIdMirrorStrategy,
-	isMirrorStrategy,
+	isDirectusFolderMirrorEnabled,
 	isNameMirrorStrategy,
 } from './prefix';
 
@@ -17,22 +17,17 @@ type Logger = {
 
 const LARGE_RELOCATE_WARN = 100;
 
-/** Locations with folder sync + by-name mirror (rename / collision path moves). */
+/** Locations with Mirror Directus Folders on (rename / collision path moves). */
 function renameSyncLocations(allSettings: Record<string, StorageLocationSettings>): string[] {
 	return Object.entries(allSettings)
-		.filter(
-			([, s]) =>
-				s.folder_sync_enabled &&
-				isNameMirrorStrategy(s.prefix_strategy) &&
-				s.folder_sync_rename === 'full_sync',
-		)
+		.filter(([, s]) => isDirectusFolderMirrorEnabled(s) && isNameMirrorStrategy(s.prefix_strategy))
 		.map(([loc]) => loc);
 }
 
-/** Locations with Sync Folder Changes + any mirror strategy (delete → move to parent). */
+/** Locations with Mirror Directus Folders on (delete → move to parent). */
 function deleteSyncLocations(allSettings: Record<string, StorageLocationSettings>): string[] {
 	return Object.entries(allSettings)
-		.filter(([, s]) => s.folder_sync_enabled && isMirrorStrategy(s.prefix_strategy))
+		.filter(([, s]) => isDirectusFolderMirrorEnabled(s))
 		.map(([loc]) => loc);
 }
 
@@ -226,7 +221,7 @@ export async function onFolderDeleted(
 ): Promise<void> {
 	for (const [location, folderPath] of Object.entries(folderPaths)) {
 		const settings = allLocationSettings[location];
-		if (!settings?.folder_sync_enabled || !isMirrorStrategy(settings.prefix_strategy)) continue;
+		if (!settings || !isDirectusFolderMirrorEnabled(settings)) continue;
 
 		const parentPath = parentPaths[location] ?? '';
 		await relocatePrefixOnLocations(database, [location], folderPath, parentPath, logger);

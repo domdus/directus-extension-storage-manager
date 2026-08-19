@@ -142,6 +142,8 @@ function setOpenStorageFolders() {
 			</v-list-item-content>
 		</v-list-item>
 
+		<v-divider />
+
 		<template v-if="loading && (!nestedFolders || nestedFolders.length === 0)">
 			<v-list-item v-for="n in 4" :key="n">
 				<v-skeleton-loader type="list-item-icon" />
@@ -163,6 +165,8 @@ function setOpenStorageFolders() {
 				/>
 			</v-item-group>
 		</div>
+
+		<v-divider />
 
 		<div class="folders">
 			<v-item-group v-model="openFolders" scope="files-navigation" multiple>

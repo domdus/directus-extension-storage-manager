@@ -3,6 +3,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { diskDelete, diskExists, diskList, diskStat, getStorageManager } from './storage';
 import { getLocationDriver, getLocationRoot } from './usage';
+import { readImageDimensions, shouldReadImageDimensions } from './image-meta';
 
 export type OrphanFile = {
 	filename_disk: string;
@@ -239,6 +240,16 @@ export async function importOrphans(
 			const type = guessMime(name);
 			const title = titleFromFilenameDisk(name);
 
+			let width: number | null = null;
+			let height: number | null = null;
+			if (shouldReadImageDimensions(type)) {
+				const dims = await readImageDimensions(disk, name);
+				if (dims) {
+					width = dims.width;
+					height = dims.height;
+				}
+			}
+
 			await database('directus_files').insert({
 				id,
 				storage: location,
@@ -247,6 +258,8 @@ export async function importOrphans(
 				title,
 				type,
 				filesize: Number(stat.size) || 0,
+				width,
+				height,
 				folder: options?.folder || null,
 				uploaded_on: now,
 				modified_on: now,

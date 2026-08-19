@@ -6,6 +6,12 @@ import { formatBytes } from '../../shared/format';
 export type MigratePayload = {
 	target_storage: string;
 	mode: MigrateMode;
+	/** Flatten into this storage folder (`''` = root). Omit to keep source paths. */
+	target_path?: string;
+	/** Selected storage folders — keep their names under the target (merge). */
+	source_folders?: string[];
+	include_empty_folders?: boolean;
+	preserve_paths?: boolean;
 	file_ids?: string[];
 	source_storage?: string;
 	source_path?: string;
@@ -103,7 +109,7 @@ async function parseSseStream(
 	onEvent: (event: MigrateProgressEvent) => void,
 ): Promise<MigrateResponse> {
 	if (!response.ok) {
-		let message = `Migration failed (${response.status})`;
+		let message = `Move failed (${response.status})`;
 		try {
 			const json = await response.json();
 			message = json?.errors?.[0]?.message || message;
@@ -140,12 +146,12 @@ async function parseSseStream(
 				}
 				onEvent(event);
 				if (event.type === 'done') finalResult = event.data;
-				if (event.type === 'error') throw new Error(event.message || 'Migration failed');
+				if (event.type === 'error') throw new Error(event.message || 'Move failed');
 			}
 		}
 	}
 
-	if (!finalResult) throw new Error('Migration stream ended without a result');
+	if (!finalResult) throw new Error('Move stream ended without a result');
 	return finalResult;
 }
 
@@ -374,8 +380,8 @@ export function useMigrateJob() {
 				finishToast(
 					res.failed ? 'warning' : 'success',
 					res.failed
-						? `Migration finished with ${res.failed} failure(s)`
-						: `Migration complete · ${res.succeeded} file(s)`,
+						? `Move finished with ${res.failed} failure(s)`
+						: `Move complete · ${res.succeeded} file(s)`,
 					`${payload.mode === 'copy' ? 'Copied' : 'Moved'} to ${payload.target_storage}`,
 				);
 			}
@@ -387,14 +393,14 @@ export function useMigrateJob() {
 				const partial = cancelledResult(payload.mode, payload.target_storage);
 				result.value = partial;
 				if (backgrounded.value) {
-					finishToast('warning', 'Migration cancelled', `${progress.succeeded} file(s) completed before cancel`);
+					finishToast('warning', 'Move cancelled', `${progress.succeeded} file(s) completed before cancel`);
 				}
 				listeners.onCancel?.(partial);
 				return partial;
 			}
 
-			const message = err?.message || 'Migration failed';
-			if (backgrounded.value) finishToast('error', 'Migration failed', message);
+			const message = err?.message || 'Move failed';
+			if (backgrounded.value) finishToast('error', 'Move failed', message);
 			listeners.onError?.(err instanceof Error ? err : new Error(message));
 			throw err;
 		} finally {
@@ -423,7 +429,7 @@ export function useMigrateJob() {
 		if (notifications && !notificationId) {
 			notificationId = notifications.add({
 				title: toastTitle(),
-				text: 'Click for details — transfer continues in the background.',
+				text: 'Click for details — move continues in the background.',
 				type: 'info',
 				persist: true,
 				closeable: true,

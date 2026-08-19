@@ -1,7 +1,7 @@
 <template>
 	<v-drawer
 		:model-value="modelValue"
-		title="Migrate Files"
+		title="Move Files"
 		icon="swap_horiz"
 		persistent
 		@update:model-value="onDrawerToggle"
@@ -21,49 +21,65 @@
 			</template>
 		</template>
 
-		<div class="drawer-body">
-			<p class="intro">
-				{{ summaryText }}
-			</p>
+	<div class="drawer-body">
+		<p class="intro">
+			{{ summaryText }}
+		</p>
+		<p v-if="!jobRunning && !localResult" class="description">
+			{{ descriptionText }}
+		</p>
 
-			<v-notice v-if="jobRunning && jobBackgrounded" type="info">
-				Transfer continues in the background. You can close this drawer and navigate elsewhere in Studio.
-			</v-notice>
+		<v-notice v-if="jobRunning && jobBackgrounded" type="info">
+			Move continues in the background. You can close this drawer and navigate elsewhere in Studio.
+		</v-notice>
 
-			<v-notice v-else-if="otherJobRunning" type="warning">
-				Another migration is already running in the background. Wait for it to finish or cancel it from the
-				progress toast.
-			</v-notice>
+		<v-notice v-else-if="otherJobRunning" type="warning">
+			Another move is already running in the background. Wait for it to finish or cancel it from the
+			progress toast.
+		</v-notice>
 
-			<template v-if="!jobRunning && !localResult">
-				<div class="field">
-					<label>Target Storage</label>
-					<v-select
-						v-model="target"
-						:items="targetChoices"
-						item-text="text"
-						item-value="value"
-						placeholder="Select target…"
-					/>
+		<template v-if="!jobRunning && !localResult">
+			<div class="field">
+				<label>Target Storage</label>
+				<v-select
+					v-model="target"
+					:items="targetChoices"
+					item-text="text"
+					item-value="value"
+					placeholder="Select target…"
+				/>
+			</div>
+
+			<div v-if="(selectionKind === 'folder' && folderId) || selectionKind === 'storage_path'" class="field">
+				<v-checkbox v-model="recursive" label="Include files in subfolders" />
+			</div>
+
+			<div v-if="selectionKind === 'storage' || selectionKind === 'storage_path'" class="field">
+				<v-checkbox v-model="includeEmptyFolders" label="Include empty folders" />
+			</div>
+
+			<div class="dry-run-row">
+				<v-button secondary :loading="dryRunning" :disabled="!canSubmit" @click="runDryRun">
+					Dry Run
+				</v-button>
+				<v-button :disabled="!canSubmit" @click="submit">Run</v-button>
+				<div v-if="dryRunResult" class="dry-run-result">
+					<span>{{ dryRunResult.total_files.toLocaleString() }} files</span>
+					<span v-if="dryRunResult.total_folders">
+						· {{ dryRunResult.total_folders.toLocaleString() }}
+						{{ dryRunResult.total_folders === 1 ? 'folder' : 'folders' }}
+					</span>
+					<span v-if="dryRunResult.empty_folders" class="dry-run-note">
+						({{ dryRunResult.empty_folders.toLocaleString() }} empty{{ includeEmptyFolders ? '' : ', skipped' }})
+					</span>
+					<span v-if="dryRunResult.total_bytes">· {{ formatBytes(dryRunResult.total_bytes) }}</span>
+					<span class="dry-run-note">will be moved to {{ target }}</span>
 				</div>
-
-				<div class="field">
-					<label>Mode</label>
-					<div class="mode-radios">
-						<v-radio v-model="mode" value="move" label="Move — delete source after verify" block />
-						<v-radio v-model="mode" value="copy" label="Copy — leave source object as orphan" block />
-					</div>
-					<p class="note">
-						Files keep the same identity in Directus; only their storage location changes. Image thumbnails
-						are moved or copied with them when possible. Move removes the originals from the old storage;
-						Copy leaves them behind as unused files.
-					</p>
-				</div>
-
-				<div v-if="(selectionKind === 'folder' && folderId) || selectionKind === 'storage_path'" class="field">
-					<v-checkbox v-model="recursive" label="Include files in subfolders" />
-				</div>
-			</template>
+				<p v-else class="note">
+					Count files, folders, and total size without moving anything.
+				</p>
+			</div>
+		</template>
 
 			<migrate-progress
 				v-if="(jobRunning && !jobBackgrounded) || localResult"
@@ -90,7 +106,7 @@
 					Run in Background
 				</v-button>
 				<v-button kind="danger" secondary class="background-btn" @click="cancelTransfer">
-					Cancel Transfer
+					Cancel Move
 				</v-button>
 				<p class="note">
 					Closing this drawer also runs in the background. Click the progress toast anytime for details.
@@ -99,7 +115,7 @@
 
 			<div v-if="localResult" class="result">
 				<v-notice v-if="localResult.cancelled" type="warning" icon="cancel">
-					Migration cancelled.
+					Move cancelled.
 					{{ localResult.succeeded.toLocaleString() }} file(s) finished before stop
 					<span v-if="localResult.total">
 						(of {{ localResult.total.toLocaleString() }} planned)</span
@@ -124,6 +140,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { useApi } from '@directus/extensions-sdk';
 import { useMigrateJob } from '../composables/use-migrate-job';
 import MigrateProgress from './migrate-progress.vue';
 import type { MigrateMode, MigrateResponse, StorageLocationInfo } from '../../shared/types';
@@ -146,6 +163,7 @@ const emit = defineEmits<{
 	(e: 'done', result: MigrateResponse): void;
 }>();
 
+const api = useApi();
 const route = useRoute();
 const router = useRouter();
 
@@ -167,7 +185,10 @@ const {
 const target = ref<string | null>(null);
 const mode = ref<MigrateMode>('move');
 const recursive = ref(true);
+const includeEmptyFolders = ref(true);
 const localResult = ref<MigrateResponse | null>(null);
+const dryRunning = ref(false);
+const dryRunResult = ref<{ total_files: number; total_folders: number; empty_folders: number; total_bytes: number } | null>(null);
 /** True when this drawer instance owns the in-foreground job. */
 const ownsForegroundJob = ref(false);
 
@@ -202,7 +223,7 @@ function bindForegroundListeners() {
 						from: progress.from || '',
 						to: activeTarget.value || target.value || '',
 						status: 'failed',
-						error: err.message || 'Migration failed',
+						error: err.message || 'Move failed',
 					},
 				],
 				transferred_bytes: progress.transferredBytes,
@@ -227,11 +248,48 @@ function showCompletedResult(res: MigrateResponse) {
 
 function resetToForm() {
 	localResult.value = null;
+	dryRunResult.value = null;
 	ownsForegroundJob.value = false;
 	const first = props.storages.find((s) => s.location !== props.sourceStorage);
 	target.value = first?.location || null;
 	mode.value = 'move';
 	recursive.value = true;
+	includeEmptyFolders.value = true;
+}
+
+watch(target, () => {
+	dryRunResult.value = null;
+});
+
+async function runDryRun() {
+	if (!target.value || dryRunning.value) return;
+	dryRunning.value = true;
+	dryRunResult.value = null;
+	try {
+		const payload: Record<string, unknown> = {
+			target_storage: target.value,
+			include_empty_folders: includeEmptyFolders.value,
+		};
+		if (props.selectionKind === 'files') {
+			payload.file_ids = props.fileIds || [];
+		} else if (props.selectionKind === 'storage') {
+			payload.source_storage = props.sourceStorage || undefined;
+		} else if (props.selectionKind === 'storage_path') {
+			payload.source_storage = props.sourceStorage || undefined;
+			payload.source_path = props.sourcePath || undefined;
+			payload.recursive = recursive.value;
+		} else if (props.selectionKind === 'folder') {
+			payload.folder_id = props.folderId ?? null;
+			payload.recursive = recursive.value;
+			if (props.sourceStorage) payload.source_storage = props.sourceStorage;
+		}
+		const resp = await api.post('/storage-manager/migrate/dry-run', payload);
+		dryRunResult.value = resp.data?.data ?? null;
+	} catch {
+		// silently ignore
+	} finally {
+		dryRunning.value = false;
+	}
 }
 
 watch(
@@ -275,7 +333,7 @@ const targetChoices = computed(() =>
 		})),
 );
 
-const confirmLabel = computed(() => (mode.value === 'move' ? 'Move' : 'Copy'));
+const confirmLabel = computed(() => 'Move');
 
 const summaryText = computed(() => {
 	const count =
@@ -293,16 +351,16 @@ const summaryText = computed(() => {
 
 	if (props.selectionKind === 'storage') {
 		return done
-			? `Migrated ${count.toLocaleString()} files${bytes} from “${props.sourceStorage}”.`
-			: `Migrate all ${count.toLocaleString()} files${bytes} on “${props.sourceStorage}”.`;
+			? `Moved ${count.toLocaleString()} files${bytes} from “${props.sourceStorage}”.`
+			: `Move all ${count.toLocaleString()} files${bytes} on “${props.sourceStorage}”.`;
 	}
 	if (props.selectionKind === 'storage_path') {
 		const pathLabel = props.sourcePath || 'this folder';
 		return done
-			? `Migrated ${count.toLocaleString()} files${bytes} from “${pathLabel}”.`
+			? `Moved ${count.toLocaleString()} files${bytes} from “${pathLabel}”.`
 			: props.estimatedCount == null
-				? `Migrate all files in “${pathLabel}”${bytes}.`
-				: `Migrate ${count.toLocaleString()} files${bytes} in “${pathLabel}”.`;
+				? `Move all files in “${pathLabel}”${bytes}.`
+				: `Move ${count.toLocaleString()} files${bytes} in “${pathLabel}”.`;
 	}
 	if (props.selectionKind === 'folder') {
 		const scope = props.folderId
@@ -310,19 +368,33 @@ const summaryText = computed(() => {
 			: 'at the root (files with no virtual folder)';
 		if (done) {
 			return props.folderId
-				? `Migrated ${count.toLocaleString()} files${bytes} from this folder.`
-				: `Migrated ${count.toLocaleString()} root files${bytes}.`;
+				? `Moved ${count.toLocaleString()} files${bytes} from this folder.`
+				: `Moved ${count.toLocaleString()} root files${bytes}.`;
 		}
 		if (props.estimatedCount == null) {
 			return props.folderId
-				? `Migrate all files ${scope}${bytes}.`
-				: `Migrate all root files${bytes} (files with no virtual folder).`;
+				? `Move all files ${scope}${bytes}.`
+				: `Move all root files${bytes} (files with no virtual folder).`;
 		}
-		return `Migrate ${count.toLocaleString()} files${bytes} ${scope}.`;
+		return `Move ${count.toLocaleString()} files${bytes} ${scope}.`;
 	}
 	return done
-		? `Migrated ${count.toLocaleString()} selected file(s)${bytes}.`
-		: `Migrate ${count.toLocaleString()} selected file(s)${bytes}.`;
+		? `Moved ${count.toLocaleString()} selected file(s)${bytes}.`
+		: `Move ${count.toLocaleString()} selected file(s)${bytes}.`;
+});
+
+const descriptionText = computed(() => {
+	if (props.selectionKind === 'storage') {
+		return `Every file currently stored on "${props.sourceStorage}" will be moved to the target storage. The file record in Directus is updated to point to the new location — no data is lost. Generated thumbnails are moved as well. Physical files are deleted from "${props.sourceStorage}" once safely copied. Empty folders can be included so the destination tree matches the source.`;
+	}
+	if (props.selectionKind === 'storage_path') {
+		const p = props.sourcePath || 'this path';
+		return `All files under "${p}" on "${props.sourceStorage}" will be moved to the target storage. File records in Directus are updated automatically. Generated thumbnails are moved as well. Physical files are removed from the source path once copied.`;
+	}
+	if (props.selectionKind === 'folder') {
+		return `Files in the selected Directus folder will be moved to the target storage. File records in Directus are updated automatically. Generated thumbnails are moved as well. Physical files are deleted from the source storage once copied.`;
+	}
+	return `The selected files will be moved to the target storage. File records in Directus are updated automatically. Generated thumbnails are moved as well. Physical files are deleted from the source once copied.`;
 });
 
 const failedRows = computed(() => (localResult.value?.results || []).filter((r) => r.status === 'failed'));
@@ -379,12 +451,14 @@ async function submit() {
 	const payload = {
 		target_storage: target.value,
 		mode: mode.value,
+		keep_source_file_on_disk: false,
 		concurrency: 1 as number,
 		file_ids: undefined as string[] | undefined,
 		source_storage: undefined as string | undefined,
 		source_path: undefined as string | undefined,
 		folder_id: undefined as string | null | undefined,
 		recursive: undefined as boolean | undefined,
+		include_empty_folders: includeEmptyFolders.value,
 	};
 
 	if (props.selectionKind === 'files') {
@@ -431,7 +505,7 @@ async function submit() {
 								from: progress.from || '',
 								to: target.value!,
 								status: 'failed',
-								error: err.message || 'Migration failed',
+								error: err.message || 'Move failed',
 							},
 						],
 						transferred_bytes: progress.transferredBytes,
@@ -461,6 +535,13 @@ async function submit() {
 .intro {
 	margin: 0;
 	color: var(--theme--foreground);
+}
+
+.description {
+	margin: 0;
+	font-size: 14px;
+	color: var(--theme--foreground-subdued);
+	line-height: 1.5;
 }
 
 .field {
@@ -503,6 +584,26 @@ async function submit() {
 
 .result .background-btn {
 	align-self: flex-start;
+}
+
+.dry-run-row {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.dry-run-result {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.dry-run-note {
+	font-weight: 400;
+	color: var(--theme--foreground-subdued);
 }
 
 .result {

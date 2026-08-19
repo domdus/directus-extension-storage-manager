@@ -47,11 +47,11 @@ export const STRATEGY_SCOPE_NOTE =
  * Directus folders are logical; files inside can sit on different adapters.
  */
 export const VIRTUAL_FOLDER_NOTE =
-	'A Directus folder is virtual: it can hold files from several storage adapters at once. Mirror and Sync run per adapter — only that storage’s files under the mirrored path are updated. Enable Sync on each adapter you want kept in step.';
+	'A Directus folder is virtual — it organises files across any storage adapter. When Mirror Directus Folders is enabled on a storage, new uploads land on the matching physical path and folder renames or deletes are kept in sync on that adapter. Files on other adapters are unaffected.';
 
 /** Main intro on /storage-manager/folders (root). */
 export const DIRECTUS_FOLDERS_PAGE_INTRO =
-	'Browse the familiar Directus folder tree — the virtual structure from the File Library is not changed here. Use it as selection scope to move or migrate files and reflect that organization on physical storage.';
+	'Browse the Directus folder tree. Use Move to Storage Folder to place files on a physical path, or Materialize to build that folder tree on disk. The virtual structure in the File Library is never changed here.';
 
 /** Longer copy for the overview Strategy Guide (strategies). */
 export const STRATEGY_GLOSSARY: StrategyGlossaryEntry[] = [

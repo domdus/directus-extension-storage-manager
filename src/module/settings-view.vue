@@ -18,12 +18,41 @@
 		</template>
 
 		<div :class="pageClass">
-			<p class="page-intro">
-				Back up or restore storage folder strategies and sync settings as JSON, or remove the dedicated
-				<code>storage_manager</code> settings field before uninstalling. Per-location storage folder rules are
-				stored in <code>directus_settings.storage_manager</code> only — other project settings are left
-				untouched.
+			<v-divider
+				class="section-divider"
+				large
+				:inline-title="false"
+				:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
+			>
+				<template #icon><v-icon name="system_update" /></template>
+				Extension Updates
+			</v-divider>
+			<p class="explain">
+				Check npm for the latest published version and compare it with the installed extension version.
 			</p>
+			<div class="actions">
+				<v-button secondary :loading="checkingUpdates" @click="checkUpdates(true)">Check now</v-button>
+			</div>
+			<div v-if="updateInfo" class="result">
+				<v-notice :type="updateNoticeType">
+					Current: <strong>{{ updateInfo.current_version }}</strong>
+					<template v-if="updateInfo.latest_version">
+						· Latest: <strong>{{ updateInfo.latest_version }}</strong>
+					</template>
+					<template v-if="updateInfo.error"> · {{ updateInfo.error }}</template>
+					<template v-else-if="updateInfo.has_update"> · Update available</template>
+					<template v-else> · Up to date</template>
+				</v-notice>
+				<p class="links">
+					<a :href="updateInfo.links.npm" target="_blank" rel="noopener noreferrer">npm</a>
+					·
+					<a :href="updateInfo.links.github" target="_blank" rel="noopener noreferrer">GitHub</a>
+					<template v-if="updateInfo.links.marketplace">
+						·
+						<a :href="updateInfo.links.marketplace">Marketplace</a>
+					</template>
+				</p>
+			</div>
 
 			<v-divider
 				class="section-divider"
@@ -35,8 +64,9 @@
 				Export / Import
 			</v-divider>
 			<p class="explain">
-				Download or restore <code>directus_settings.storage_manager</code> only (storage folder strategies and
-				folder sync options per storage location).
+				Back up or restore Mirror Directus Folders settings as JSON, or remove the dedicated
+				<code>storage_manager</code> settings field before uninstalling. Per-location rules are stored in
+				<code>directus_settings.storage_manager</code> only — other project settings are left untouched.
 			</p>
 
 			<div class="actions">
@@ -111,12 +141,14 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { computed, onMounted, ref } from 'vue';
+import { useApi } from '@directus/extensions-sdk';
 import { useStorageSettingsAdmin } from './composables/use-storage-settings-admin';
 import { usePageClass } from './composables/use-page-class';
 import ModuleNavigation from './navigation.vue';
 
 const pageClass = usePageClass();
+const api = useApi();
 
 const {
 	loading,
@@ -133,10 +165,45 @@ const result = ref<{ clearedValue: boolean; deletedField: boolean } | null>(null
 const importing = ref(false);
 const importMessage = ref<{ type: 'success' | 'danger'; text: string } | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
+const checkingUpdates = ref(false);
+const updateInfo = ref<{
+	current_version: string;
+	latest_version: string | null;
+	has_update: boolean;
+	checked_at: string;
+	error?: string;
+	links: { npm: string; github: string; marketplace: string | null };
+} | null>(null);
+const updateNoticeType = computed(() => {
+	if (!updateInfo.value) return 'info';
+	if (updateInfo.value.error) return 'warning';
+	return updateInfo.value.has_update ? 'warning' : 'success';
+});
 
 onMounted(() => {
 	ensureLoaded();
 });
+
+async function checkUpdates(force: boolean) {
+	checkingUpdates.value = true;
+	try {
+		const res = await api.get('/storage-manager/update-check', {
+			params: { force: force ? '1' : undefined },
+		});
+		updateInfo.value = res.data?.data || null;
+	} catch (error: any) {
+		updateInfo.value = {
+			current_version: 'unknown',
+			latest_version: null,
+			has_update: false,
+			checked_at: new Date().toISOString(),
+			error: error?.response?.data?.errors?.[0]?.message || error?.message || 'Update check failed',
+			links: { npm: '#', github: '#', marketplace: null },
+		};
+	} finally {
+		checkingUpdates.value = false;
+	}
+}
 
 function exportConfig() {
 	importMessage.value = null;
@@ -209,15 +276,9 @@ async function runCleanup() {
 	margin-top: 40px;
 }
 
-.page-intro {
-	margin: 0 0 24px;
-	line-height: 1.55;
-	color: var(--theme--foreground);
-}
-
-.page-intro code {
-	font-family: var(--theme--fonts--monospace--font-family, monospace);
-	font-size: 0.9em;
+.links {
+	margin: 8px 0 0;
+	font-size: 13px;
 }
 
 .explain,

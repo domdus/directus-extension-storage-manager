@@ -1,5 +1,5 @@
 <template>
-	<private-view title="Storage Manager" icon="swap_horiz">
+	<private-view title="Storage Manager" icon="storage">
 		<template #headline>
 			<v-breadcrumb :items="[{ name: 'Storage Manager', to: '/storage-manager' }]" />
 		</template>
@@ -11,34 +11,9 @@
 		<template #sidebar>
 			<sidebar-detail id="about" icon="info" title="About">
 				<p class="sidebar-text">
-					Copy or move files between configured storage adapters. Physical objects are streamed via Directus
-					storage drivers; database <code>id</code> and <code>filename_disk</code> stay the same.
+					Move files between configured storage adapters and manage physical storage folders. Use Directus
+					Folders view to materialize virtual folders into real storage paths.
 				</p>
-			</sidebar-detail>
-			<sidebar-detail id="strategy-guide" icon="menu_book" title="Strategy Guide">
-				<div class="glossary-sidebar">
-					<p class="glossary-scope">{{ STRATEGY_SCOPE_NOTE }}</p>
-
-					<div v-for="entry in STRATEGY_GLOSSARY" :key="entry.value" class="glossary-item">
-						<strong>{{ entry.title }}</strong>
-						<p>{{ entry.body }}</p>
-					</div>
-
-					<section class="glossary-section" aria-labelledby="sync-folder-changes-heading">
-						<span id="sync-folder-changes-heading" class="glossary-section-label">
-							Option: Sync Folder Changes
-						</span>
-						<p class="glossary-section-intro">{{ syncGuideIntro }}</p>
-						<div
-							v-for="entry in syncGuideDetails"
-							:key="entry.value"
-							class="glossary-item"
-						>
-							<strong>{{ entry.title }}</strong>
-							<p>{{ entry.body }}</p>
-						</div>
-					</section>
-				</div>
 			</sidebar-detail>
 		</template>
 
@@ -61,9 +36,8 @@
 				</v-divider>
 
 				<p class="page-intro">
-					Browse, create, and migrate files and storage folders across your adapters. Build folder
-					structure yourself, or pick a smart folder strategy per storage — see the
-					<strong>Strategy Guide</strong> in the sidebar for further information.
+					Browse, create, and move files and storage folders across your adapters. Use Materialize in
+					Directus Folders view to convert virtual folder hierarchy into physical storage paths.
 				</p>
 
 				<div class="storage-grid">
@@ -77,7 +51,7 @@
 							<v-button small secondary @click="goStorage(storage.location)">Browse</v-button>
 						</div>
 
-						<usage-bar :usage="storage" plain />
+						<usage-bar :usage="storage" />
 
 						<div class="meta">
 							<span class="tag">{{ storage.file_count.toLocaleString() }} files</span>
@@ -91,123 +65,70 @@
 						</div>
 
 						<div class="card-strategy">
-							<span class="strategy-label" :title="strategyHeadline(storage.location)">
-								<span class="strategy-prefix">Storage Folder Strategy:</span>
-								{{ strategyLabel(storage.location) }}
-							</span>
-							<v-button small secondary @click="openStrategyDialog(storage.location)">
-								<v-icon name="tune" left />
-								Configure
-							</v-button>
+							<div class="mirror-copy">
+								<strong>Mirror Directus Folders</strong>
+								<span>
+									New uploads and folder rename/delete follow the Directus folder tree on this
+									adapter.
+								</span>
+							</div>
+							<v-checkbox
+								:model-value="storage.mirror_directus_folders"
+								:disabled="Boolean(savingMirror[storage.location])"
+								@update:model-value="(value: boolean) => setMirror(storage.location, value)"
+							/>
 						</div>
+
 					</article>
 				</div>
 			</template>
 		</div>
-
-		<v-dialog
-			:model-value="strategyDialogLocation !== null"
-			@update:model-value="(open: boolean) => !open && closeStrategyDialog()"
-			@esc="closeStrategyDialog"
-		>
-			<v-card v-if="strategyDialogLocation" class="strategy-dialog-card">
-				<v-card-title>Storage Folder Strategy — {{ strategyDialogLocation }}</v-card-title>
-				<v-card-text>
-					<storage-settings
-						:key="strategyDialogLocation"
-						:location="strategyDialogLocation"
-						@saved="onStrategySaved"
-					/>
-				</v-card-text>
-				<v-card-actions>
-					<v-button secondary @click="closeStrategyDialog">Close</v-button>
-				</v-card-actions>
-			</v-card>
-		</v-dialog>
 	</private-view>
 </template>
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue';
-import { useApi } from '@directus/extensions-sdk';
 import { useRouter } from 'vue-router';
+import { useApi } from '@directus/extensions-sdk';
 import ModuleNavigation from './navigation.vue';
 import UsageBar from './components/usage-bar.vue';
-import StorageSettings from './components/storage-settings.vue';
 import { usePageClass } from './composables/use-page-class';
 import { useStorageManager } from './composables/use-storage-manager';
-import {
-	STRATEGY_CARD_LABELS,
-	STRATEGY_GLOSSARY,
-	STRATEGY_SCOPE_NOTE,
-	SYNC_GLOSSARY,
-} from '../shared/strategies';
-import type { PrefixStrategy, StorageLocationSettings } from '../shared/types';
-import { STORAGE_MANAGER_LOCATION_DEFAULTS } from '../shared/types';
 import { storageManagerPath } from '../shared/storage-path-url';
-
-const syncGuideIntro = SYNC_GLOSSARY.find((e) => e.value === 'sync')?.body || '';
-const syncGuideDetails = SYNC_GLOSSARY.filter((e) => e.value !== 'sync');
+import { directusFolderMirrorPatch } from '../shared/settings';
 
 const router = useRouter();
 const api = useApi();
 const pageClass = usePageClass();
 const { storages, storagesError, loadStorages } = useStorageManager();
 const loading = ref(true);
-/** Strategy per location — for card labels only; editing happens in the dialog. */
-const locationStrategies = reactive<Record<string, PrefixStrategy>>({});
-const strategyDialogLocation = ref<string | null>(null);
-
-function strategyLabel(location: string): string {
-	const value = locationStrategies[location] || STORAGE_MANAGER_LOCATION_DEFAULTS.prefix_strategy;
-	return STRATEGY_CARD_LABELS[value] || 'None';
-}
-
-function strategyHeadline(location: string): string {
-	return `Storage Folder Strategy: ${strategyLabel(location)}`;
-}
-
-function openStrategyDialog(location: string) {
-	strategyDialogLocation.value = location;
-}
-
-async function closeStrategyDialog() {
-	strategyDialogLocation.value = null;
-	await loadStrategyLabels();
-}
-
-async function onStrategySaved() {
-	await loadStrategyLabels();
-}
-
-async function loadStrategyLabels() {
-	try {
-		const res = await api.get('/storage-manager/settings');
-		const locations = (res.data?.data?.locations || {}) as Record<string, StorageLocationSettings>;
-		for (const key of Object.keys(locationStrategies)) delete locationStrategies[key];
-		for (const [loc, partial] of Object.entries(locations)) {
-			locationStrategies[loc] = (partial?.prefix_strategy ||
-				STORAGE_MANAGER_LOCATION_DEFAULTS.prefix_strategy) as PrefixStrategy;
-		}
-		for (const storage of storages.value) {
-			if (!locationStrategies[storage.location]) {
-				locationStrategies[storage.location] = STORAGE_MANAGER_LOCATION_DEFAULTS.prefix_strategy;
-			}
-		}
-	} catch {
-		for (const storage of storages.value) {
-			locationStrategies[storage.location] = STORAGE_MANAGER_LOCATION_DEFAULTS.prefix_strategy;
-		}
-	}
-}
+const savingMirror = reactive<Record<string, boolean>>({});
 
 async function refresh() {
 	loading.value = true;
 	try {
 		await loadStorages(true);
-		await loadStrategyLabels();
 	} finally {
 		loading.value = false;
+	}
+}
+
+async function setMirror(location: string, enabled: boolean) {
+	const card = storages.value.find((s) => s.location === location);
+	if (!card || savingMirror[location]) return;
+
+	const previous = Boolean(card.mirror_directus_folders);
+	card.mirror_directus_folders = enabled;
+	savingMirror[location] = true;
+	try {
+		await api.patch('/storage-manager/settings', {
+			locations: { [location]: directusFolderMirrorPatch(enabled) },
+		});
+	} catch {
+		card.mirror_directus_folders = previous;
+		window.alert('Could not save Mirror Directus Folders.');
+	} finally {
+		savingMirror[location] = false;
 	}
 }
 
@@ -391,11 +312,29 @@ onMounted(refresh);
 
 .card-strategy {
 	display: flex;
-	align-items: center;
+	align-items: flex-start;
 	justify-content: space-between;
 	gap: 12px;
 	padding-block-start: 12px;
 	border-block-start: var(--theme--border-width) solid var(--theme--border-color-subdued);
+}
+
+.mirror-copy {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+	flex: 1;
+}
+
+.mirror-copy strong {
+	font-size: 13px;
+}
+
+.mirror-copy span {
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--theme--foreground-subdued);
 }
 
 .strategy-label {

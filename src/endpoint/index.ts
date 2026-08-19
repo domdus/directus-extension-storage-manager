@@ -10,20 +10,28 @@ import {
 import {
 	browseStorageFolders,
 	browseStorageFolderTree,
+	copyEmptyStorageFolders,
 	countStorageFolders,
 	createStorageFolder,
 	deleteStorageFolders,
 	ensureFileUnderPath,
 	joinStoragePath,
+	listEmptyStorageFolders,
+	listStorageFolderPaths,
 	moveFilesToStoragePath,
 	moveStorageFolder,
 	normalizeStoragePath,
+	relocateFolderPath,
 	relocateStorageFolder,
+	relocateUnderTargetPath,
 	renameStorageFolder,
 } from './physical-folders';
 import type { MigrateMode, StorageManagerSettings, StorageLocationSettings } from '../shared/types';
 import { STORAGE_MANAGER_FIELD, STORAGE_MANAGER_LOCATION_DEFAULTS } from '../shared/types';
-import { invalidateSettingsCache } from '../hook/settings';
+import { getLocationSettings, invalidateSettingsCache, loadSettings } from '../hook/settings';
+import { isDirectusFolderMirrorEnabled } from '../hook/prefix';
+import { materializeDryRun, materializeRun } from './materialize';
+import { checkForUpdates } from './update-check';
 
 type EndpointContext = {
 	services: Record<string, any>;
@@ -185,15 +193,28 @@ export default {
 				if (!requireAdmin(req, res)) return;
 
 				const locations = listConfiguredLocations(env);
+				const settings = await loadSettings(database);
 				const storages = await Promise.all(
 					locations.map(async (loc) => {
 						const info = await buildStorageLocationInfo(env, database, loc);
 						info.folder_count = await countStorageFolders(database, loc, env);
+						info.mirror_directus_folders = isDirectusFolderMirrorEnabled(getLocationSettings(settings, loc));
 						return info;
 					}),
 				);
 
 				res.json({ data: storages });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		router.get('/update-check', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const force = String(req.query.force || '') === '1';
+				const data = await checkForUpdates(force);
+				res.json({ data });
 			} catch (error) {
 				next(error);
 			}
@@ -212,6 +233,8 @@ export default {
 
 				const info = await buildStorageLocationInfo(env, database, location);
 				info.folder_count = await countStorageFolders(database, location, env);
+				const settings = await loadSettings(database);
+				info.mirror_directus_folders = isDirectusFolderMirrorEnabled(getLocationSettings(settings, location));
 				res.json({ data: info });
 			} catch (error) {
 				next(error);
@@ -383,19 +406,44 @@ export default {
 					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
 					return;
 				}
-				const body = (req.body || {}) as { file_ids?: string[]; target_path?: string };
+				const body = (req.body || {}) as {
+					file_ids?: string[];
+					target_path?: string;
+					source_folders?: string[];
+					include_empty_folders?: boolean;
+					source_storage?: string;
+					preserve_paths?: boolean;
+				};
 				const fileIds = Array.isArray(body.file_ids) ? body.file_ids.map(String) : [];
-				if (!fileIds.length) {
-					res.status(400).json({ errors: [{ message: 'Provide file_ids' }] });
+				const sourceFolders = Array.isArray(body.source_folders) ? body.source_folders.map(String) : [];
+				if (!fileIds.length && !sourceFolders.length && !body.source_storage) {
+					res.status(400).json({ errors: [{ message: 'Provide file_ids or source_folders' }] });
 					return;
 				}
-				const data = await moveFilesToStoragePath(
-					database,
-					location,
-					fileIds,
-					String(body.target_path ?? ''),
-					logger,
-				);
+				const data = fileIds.length
+					? await moveFilesToStoragePath(
+							database,
+							location,
+							fileIds,
+							String(body.target_path ?? ''),
+							logger,
+							env,
+							sourceFolders,
+							Boolean(body.preserve_paths),
+						)
+					: { moved: 0, failed: 0, skipped: 0, results: [] };
+				if (body.include_empty_folders !== false && (sourceFolders.length || body.source_storage)) {
+					await copyEmptyStorageFolders({
+						database,
+						sourceLocation: String(body.source_storage || location),
+						targetLocation: location,
+						env,
+						targetPath: String(body.target_path ?? ''),
+						sourceFolders: sourceFolders.length ? sourceFolders : undefined,
+						removeSource: true,
+						logger,
+					});
+				}
 				res.json({ data });
 			} catch (error) {
 				next(error);
@@ -761,6 +809,118 @@ export default {
 			}
 		});
 
+		/** Dry-run: count files, folders, and destination conflicts without moving anything. */
+		router.post('/migrate/dry-run', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+
+				const body = (req.body || {}) as {
+					target_storage?: string;
+					target_path?: string;
+					preserve_paths?: boolean;
+					source_folders?: string[];
+					file_ids?: string[];
+					source_storage?: string;
+					source_path?: string;
+					folder_id?: string | null;
+					recursive?: boolean;
+				};
+
+				const target = String(body.target_storage || '').trim();
+				const locations = listConfiguredLocations(env);
+				if (!target || !locations.includes(target)) {
+					res.status(400).json({ errors: [{ message: 'Provide a valid target_storage' }] });
+					return;
+				}
+
+				const targetPath = body.target_path != null ? String(body.target_path) : '';
+				const preservePaths = Boolean(body.preserve_paths);
+				const sourceFolders = Array.isArray(body.source_folders) ? body.source_folders.map(String) : [];
+				const fileIds = await resolveFileIds(database, body);
+
+				const rows: Array<{
+					id: string;
+					storage: string;
+					filesize: number | null;
+					filename_disk: string | null;
+				}> = fileIds.length
+					? await database('directus_files')
+						.select('id', 'storage', 'filesize', 'filename_disk')
+						.whereIn('id', fileIds)
+					: [];
+
+				const destFolders = new Set<string>();
+				const samples: Array<{ from: string; to: string; skipped: boolean }> = [];
+				const planned = rows.map((row) => {
+					const from = String(row.filename_disk || '');
+					const to = relocateUnderTargetPath(from, targetPath, sourceFolders, preservePaths);
+					const dir = normalizeStoragePath(to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '');
+					if (dir) destFolders.add(dir);
+					return { id: String(row.id), storage: String(row.storage), from, to };
+				});
+
+				const destKeys = [...new Set(planned.map((p) => p.to).filter(Boolean))];
+				const occupants = destKeys.length
+					? await database('directus_files')
+						.select('id', 'filename_disk')
+						.where({ storage: target })
+						.whereIn('filename_disk', destKeys)
+					: [];
+				const occupantByPath = new Map<string, string>();
+				for (const occupant of occupants) {
+					occupantByPath.set(String(occupant.filename_disk), String(occupant.id));
+				}
+
+				let skipped = 0;
+				for (const item of planned) {
+					const occupantId = occupantByPath.get(item.to);
+					const isSkipped = Boolean(occupantId && occupantId !== item.id);
+					if (isSkipped) skipped += 1;
+					if (samples.length < 20) {
+						samples.push({
+							from: `${item.storage}:${item.from}`,
+							to: `${target}:${item.to}`,
+							skipped: isSkipped,
+						});
+					}
+				}
+
+				let empty_folders = 0;
+				const sourceStorage = body.source_storage ? String(body.source_storage) : '';
+				if (sourceStorage && locations.includes(sourceStorage)) {
+					const sourcePath = body.source_path != null ? normalizeStoragePath(String(body.source_path)) : '';
+					const empty = (await listEmptyStorageFolders(database, sourceStorage, env)).filter((p) => {
+						if (sourceFolders.length) {
+							return sourceFolders.some((f) => {
+								const prefix = normalizeStoragePath(f);
+								return p === prefix || p.startsWith(`${prefix}/`);
+							});
+						}
+						if (sourcePath) return p === sourcePath || p.startsWith(`${sourcePath}/`);
+						return true;
+					});
+					empty_folders = empty.length;
+					for (const folder of empty) {
+						const dest = relocateFolderPath(folder, targetPath, sourceFolders.length ? sourceFolders : undefined);
+						if (dest) destFolders.add(dest);
+					}
+				}
+
+				res.json({
+					data: {
+						total_files: rows.length,
+						total_folders: destFolders.size,
+						empty_folders,
+						total_bytes: rows.reduce((sum, r) => sum + (Number(r.filesize) || 0), 0),
+						skipped,
+						samples,
+					},
+				});
+			} catch (error) {
+				next(error);
+			}
+		});
+
 		router.post('/migrate', async (req: Request, res: Response, next: NextFunction) => {
 			try {
 				if (!requireAdmin(req, res)) return;
@@ -768,6 +928,11 @@ export default {
 				const body = (req.body || {}) as {
 					target_storage?: string;
 					mode?: MigrateMode;
+					keep_source_file_on_disk?: boolean;
+					target_path?: string;
+					source_folders?: string[];
+					include_empty_folders?: boolean;
+					preserve_paths?: boolean;
 					file_ids?: string[];
 					source_storage?: string;
 					source_path?: string;
@@ -859,9 +1024,17 @@ export default {
 					fileIds,
 					targetStorage: target,
 					mode,
+					keepSourceFileOnDisk: Boolean(body.keep_source_file_on_disk),
+					targetPath: body.target_path != null ? String(body.target_path) : undefined,
+					sourceFolders: Array.isArray(body.source_folders) ? body.source_folders.map(String) : undefined,
+					includeEmptyFolders: body.include_empty_folders !== false,
+					preservePaths: Boolean(body.preserve_paths),
+					sourceStorage: body.source_storage ? String(body.source_storage) : undefined,
+					sourcePath: body.source_path != null ? String(body.source_path) : undefined,
 					concurrency: body.concurrency,
 					database,
 					logger,
+					env,
 				});
 
 				res.json({ data: result });
@@ -881,6 +1054,11 @@ export default {
 				const body = (req.body || {}) as {
 					target_storage?: string;
 					mode?: MigrateMode;
+					keep_source_file_on_disk?: boolean;
+					target_path?: string;
+					source_folders?: string[];
+					include_empty_folders?: boolean;
+					preserve_paths?: boolean;
 					file_ids?: string[];
 					source_storage?: string;
 					source_path?: string;
@@ -977,10 +1155,18 @@ export default {
 						fileIds,
 						targetStorage: target,
 						mode,
+						keepSourceFileOnDisk: Boolean(body.keep_source_file_on_disk),
+						targetPath: body.target_path != null ? String(body.target_path) : undefined,
+					sourceFolders: Array.isArray(body.source_folders) ? body.source_folders.map(String) : undefined,
+					includeEmptyFolders: body.include_empty_folders !== false,
+					preservePaths: Boolean(body.preserve_paths),
+					sourceStorage: body.source_storage ? String(body.source_storage) : undefined,
+					sourcePath: body.source_path != null ? String(body.source_path) : undefined,
 						// Sequential gives clearer File N/M UX; still allow override
 						concurrency: body.concurrency ?? 1,
 						database,
 						logger,
+						env,
 						isCancelled: () => closed,
 						onProgress: (event) => send(event as unknown as Record<string, unknown>),
 					});
@@ -994,6 +1180,173 @@ export default {
 				if (!closed) {
 					res.end();
 				}
+			} catch (error) {
+				if (!res.headersSent) {
+					next(error);
+					return;
+				}
+				try {
+					res.write(
+						`data: ${JSON.stringify({ type: 'error', message: error instanceof Error ? error.message : String(error) })}\n\n`,
+					);
+					res.end();
+				} catch {
+					// ignore
+				}
+			}
+		});
+
+		router.post('/materialize/dry-run', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const body = (req.body || {}) as {
+					folder_id?: string | null;
+					mode?: 'preserve' | 'merge';
+					target_storage?: string;
+					structure_only?: boolean;
+					recursive?: boolean;
+				};
+				const mode = body.mode === 'merge' ? 'merge' : 'preserve';
+				const folderId = body.folder_id === undefined ? null : body.folder_id === null || body.folder_id === '' ? null : String(body.folder_id);
+				const targetStorage = String(body.target_storage || '').trim();
+				if (mode === 'merge' && !targetStorage) {
+					res.status(400).json({ errors: [{ message: 'target_storage is required when mode is "merge"' }] });
+					return;
+				}
+				if (mode === 'merge') {
+					const locations = listConfiguredLocations(env);
+					if (!locations.includes(targetStorage)) {
+						res.status(400).json({ errors: [{ message: `Unknown target storage: ${targetStorage}` }] });
+						return;
+					}
+				}
+				const data = await materializeDryRun({
+					database,
+					folderId,
+					mode,
+					targetStorage: targetStorage || undefined,
+					structureOnly: Boolean(body.structure_only),
+					recursive: Boolean(body.recursive),
+				});
+				res.json({ data });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		router.post('/materialize', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const body = (req.body || {}) as {
+					folder_id?: string | null;
+					mode?: 'preserve' | 'merge';
+					target_storage?: string;
+					structure_only?: boolean;
+					keep_source_file_on_disk?: boolean;
+					recursive?: boolean;
+				};
+				const mode = body.mode === 'merge' ? 'merge' : 'preserve';
+				const folderId = body.folder_id === undefined ? null : body.folder_id === null || body.folder_id === '' ? null : String(body.folder_id);
+				const targetStorage = String(body.target_storage || '').trim();
+				if (mode === 'merge' && !targetStorage) {
+					res.status(400).json({ errors: [{ message: 'target_storage is required when mode is "merge"' }] });
+					return;
+				}
+				if (mode === 'merge') {
+					const locations = listConfiguredLocations(env);
+					if (!locations.includes(targetStorage)) {
+						res.status(400).json({ errors: [{ message: `Unknown target storage: ${targetStorage}` }] });
+						return;
+					}
+				}
+				const data = await materializeRun({
+					database,
+					logger,
+					folderId,
+					mode,
+					targetStorage: targetStorage || undefined,
+					structureOnly: Boolean(body.structure_only),
+					keepSourceFileOnDisk: Boolean(body.keep_source_file_on_disk),
+					recursive: Boolean(body.recursive),
+				});
+				res.json({ data });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		router.post('/materialize/stream', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const body = (req.body || {}) as {
+					folder_id?: string | null;
+					mode?: 'preserve' | 'merge';
+					target_storage?: string;
+					structure_only?: boolean;
+					keep_source_file_on_disk?: boolean;
+					recursive?: boolean;
+				};
+				const mode = body.mode === 'merge' ? 'merge' : 'preserve';
+				const folderId =
+					body.folder_id === undefined
+						? null
+						: body.folder_id === null || body.folder_id === ''
+							? null
+							: String(body.folder_id);
+				const targetStorage = String(body.target_storage || '').trim();
+				if (mode === 'merge' && !targetStorage) {
+					res.status(400).json({ errors: [{ message: 'target_storage is required when mode is "merge"' }] });
+					return;
+				}
+				if (mode === 'merge') {
+					const locations = listConfiguredLocations(env);
+					if (!locations.includes(targetStorage)) {
+						res.status(400).json({ errors: [{ message: `Unknown target storage: ${targetStorage}` }] });
+						return;
+					}
+				}
+
+				res.status(200);
+				res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+				res.setHeader('Cache-Control', 'no-cache, no-transform');
+				res.setHeader('Connection', 'keep-alive');
+				res.setHeader('X-Accel-Buffering', 'no');
+				(res as any).flushHeaders?.();
+
+				let closed = false;
+				const markClosed = () => {
+					closed = true;
+				};
+				req.on('close', markClosed);
+				res.on('close', markClosed);
+
+				const send = (event: Record<string, unknown>) => {
+					if (closed) return;
+					res.write(`data: ${JSON.stringify(event)}\n\n`);
+					const flush = (res as any).flush;
+					if (typeof flush === 'function') flush.call(res);
+				};
+
+				try {
+				await materializeRun({
+					database,
+					logger,
+					folderId,
+					mode,
+					targetStorage: targetStorage || undefined,
+					structureOnly: Boolean(body.structure_only),
+					keepSourceFileOnDisk: Boolean(body.keep_source_file_on_disk),
+					recursive: Boolean(body.recursive),
+					isCancelled: () => closed,
+					onProgress: (event) => send(event as unknown as Record<string, unknown>),
+				});
+				} catch (err) {
+					send({
+						type: 'error',
+						message: err instanceof Error ? err.message : String(err),
+					});
+				}
+				if (!closed) res.end();
 			} catch (error) {
 				if (!res.headersSent) {
 					next(error);

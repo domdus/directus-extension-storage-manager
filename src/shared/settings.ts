@@ -86,3 +86,10 @@ function normalizeNameMirrorClaims(raw: unknown): Record<string, string> {
 export function serializeStorageManagerSettings(raw: unknown): StorageManagerSettings {
 	return normalizeStorageManagerSettings({ locations: {}, ...(raw as object) });
 }
+
+/** PATCH payload for the overview Mirror Directus Folders toggle. */
+export function directusFolderMirrorPatch(enabled: boolean): Partial<StorageLocationSettings> {
+	return enabled
+		? { prefix_strategy: 'folder', folder_sync_enabled: true, folder_sync_rename: 'full_sync' }
+		: { prefix_strategy: 'none', folder_sync_enabled: false };
+}

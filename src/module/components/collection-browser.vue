@@ -17,13 +17,14 @@ import LayoutSidebarDetail from './layout-sidebar-detail.vue';
 import MigrateDrawer from './migrate-drawer.vue';
 import ImportOrphansDrawer from './import-orphans-drawer.vue';
 import UsageBar from './usage-bar.vue';
-import StorageSettings from './storage-settings.vue';
 import AddStorageFolder from './add-storage-folder.vue';
 import StorageFolderSection from './storage-folder-section.vue';
+import DirectusFolderSection from './directus-folder-section.vue';
 import StorageTargetPicker from './storage-target-picker.vue';
 import type { StorageTarget } from './storage-target-picker.vue';
 import DeleteStorageFolderDialog from './delete-storage-folder-dialog.vue';
 import UploadFilesDialog from './upload-files-dialog.vue';
+import MaterializeDrawer from './materialize-drawer.vue';
 import { useDropUpload } from '../composables/use-drop-upload';
 import { useFilesBrowserPreset } from '../composables/use-files-browser-preset';
 import { useFolders } from '../composables/use-folders';
@@ -61,8 +62,19 @@ const storageFolders = ref<StorageBrowseFolder[]>([]);
 const foldersLoading = ref(false);
 
 const moveToDialogActive = ref(false);
+const materializeOpen = ref(false);
 const selectedMoveTarget = ref<StorageTarget>({ location: '', path: '' });
 const moving = ref(false);
+const moveDryRunning = ref(false);
+const moveIncludeEmptyFolders = ref(true);
+const moveDryRun = ref<{
+	total_files: number;
+	total_folders: number;
+	empty_folders: number;
+	total_bytes: number;
+	skipped: number;
+	samples: Array<{ from: string; to: string; skipped: boolean }>;
+} | null>(null);
 
 const confirmDelete = ref(false);
 const confirmDeleteFolders = ref(false);
@@ -109,6 +121,16 @@ const title = computed(() => {
 const showFoldersPageIntro = computed(
 	() => props.mode === 'folders' && !props.folder && !search.value && !filter.value,
 );
+
+/** Child Directus folders for the current virtual parent (root or folder). */
+const childDirectusFolders = computed(() => {
+	if (props.mode !== 'folders' || !folders.value) return [];
+	const parent = props.folder ?? null;
+	return folders.value
+		.filter((folder) => (parent ? folder.parent === parent : folder.parent == null))
+		.slice()
+		.sort((a, b) => a.name.localeCompare(b.name));
+});
 
 const breadcrumb = computed(() => {
 	const items = [{ name: 'Storage Manager', to: '/storage-manager' }];
@@ -173,8 +195,8 @@ const multiStorageFolder = computed(
 	() => props.mode === 'folders' && folderStorages.value.length > 1,
 );
 
-/** Show per-file storage labels when the current folder spans multiple adapters. */
-const showStorageLocationLabels = multiStorageFolder;
+/** Show per-file storage labels in Directus Folders (always — not only multi-storage). */
+const showStorageLocationLabels = computed(() => props.mode === 'folders');
 
 const defaultTabularFields = ['title', 'type', 'filesize', 'modified_on'];
 
@@ -201,18 +223,14 @@ const multiStorageNotice = computed(() => {
 	if (!multiStorageFolder.value) return '';
 	const list = folderStorages.value.join(', ');
 	const scope = props.folder ? 'folder' : 'root view';
-	return `This ${scope} has files on ${folderStorages.value.length} storages (${list}). Sync Folder Changes updates each adapter separately.`;
+	return `This ${scope} has files on ${folderStorages.value.length} storages (${list}).`;
 });
 
-const canMigrateFolder = computed(
-	() =>
-		props.mode === 'folders' &&
-		selection.value.length === 0 &&
-		folderMigrateCount.value !== null &&
-		folderMigrateCount.value > 0,
+const canMaterializeFolder = computed(
+	() => props.mode === 'folders' && selection.value.length === 0 && folderSelection.value.length === 0,
 );
 
-/** Whole-adapter migrate in header — storage root only, nothing selected. */
+/** Whole-adapter transfer in sidebar — storage root only, nothing selected. */
 const canMigrateStorage = computed(
 	() =>
 		props.mode === 'storage' &&
@@ -226,15 +244,81 @@ const detectLabel = computed(() =>
 	normalizedStoragePath.value ? 'Detect Files in this Folder' : `Detect Files on ${props.storage}`,
 );
 
-/** Nothing selected — show browse-level actions (upload / detect / migrate whole scope). */
+/** Nothing selected — show browse-level actions (detect / migrate whole scope). */
 const nothingSelected = computed(
 	() => selection.value.length === 0 && folderSelection.value.length === 0,
 );
 
-/** Move selected files to any adapter + path (physical folders use the context menu). */
-const canMoveSelectedFiles = computed(
-	() => selection.value.length > 0 && folderSelection.value.length === 0,
+/** Move selected files, selected physical folders, this Directus folder, or all files on a storage root. */
+const canMoveToStorageFolder = computed(
+	() =>
+		selection.value.length > 0 ||
+		(props.mode === 'storage' && folderSelection.value.length > 0) ||
+		(props.mode === 'storage' &&
+			Boolean(props.storage) &&
+			!normalizedStoragePath.value &&
+			selection.value.length === 0 &&
+			folderSelection.value.length === 0) ||
+		(props.mode === 'folders' &&
+			selection.value.length === 0 &&
+			folderSelection.value.length === 0 &&
+			(folderMigrateCount.value ?? 0) > 0),
 );
+
+const moveIsWholeAdapter = computed(
+	() =>
+		props.mode === 'storage' &&
+		Boolean(props.storage) &&
+		!normalizedStoragePath.value &&
+		selection.value.length === 0 &&
+		folderSelection.value.length === 0,
+);
+
+const moveScopeHint = computed(() => {
+	if (moveIsWholeAdapter.value) {
+		return `Moves every file and folder on “${props.storage}” into the destination you pick. Existing folders with the same name are merged. Files that already exist at the destination stay there.`;
+	}
+	if (props.mode === 'storage' && folderSelection.value.length) {
+		return folderSelection.value.length === 1
+			? 'Moves the selected storage folder into the destination you pick. If that folder name already exists there, files are merged into it.'
+			: 'Moves the selected storage folders into the destination you pick. Matching folder names are merged.';
+	}
+	if (selection.value.length === 1) return 'Moves the selected file into the storage folder you pick.';
+	if (selection.value.length > 1) {
+		return `Moves ${selection.value.length} selected files into the storage folder you pick.`;
+	}
+	if (props.mode === 'folders') {
+		return props.folder
+			? 'No files selected — moves all files in this Directus folder into the storage folder you pick.'
+			: 'No files selected — moves all unfiled files into the storage folder you pick.';
+	}
+	return '';
+});
+
+const moveSourceFolders = computed(() =>
+	props.mode === 'storage' && folderSelection.value.length ? folderSelection.value.map(String) : [],
+);
+
+const moveActionLabel = computed(() =>
+	moveIsWholeAdapter.value ? `Move all on ${props.storage}` : 'Move to Storage Folder',
+);
+
+const moveDestinationHint = computed(() => {
+	const loc = selectedMoveTarget.value.location;
+	if (!loc) return '';
+	const dest = selectedMoveTarget.value.path ? `${loc}/${selectedMoveTarget.value.path}/` : `${loc}/`;
+	if (moveIsWholeAdapter.value) {
+		return `Everything on “${props.storage}” will be merged into ${dest}`;
+	}
+	if (moveSourceFolders.value.length === 1) {
+		const name = String(moveSourceFolders.value[0]).split('/').filter(Boolean).pop();
+		return `Folder “${name}” will be merged into ${dest}${name}/`;
+	}
+	if (moveSourceFolders.value.length > 1) {
+		return `Selected folders will be merged into ${dest}{folder-name}/`;
+	}
+	return `Files will be moved to ${dest}`;
+});
 
 /** Migrate Selected only when storage folders are selected (files use Move). */
 const canMigrateSelected = computed(
@@ -330,7 +414,7 @@ async function applyCardStorageBadges(items: Record<string, any>[] | undefined) 
 
 	await nextTick();
 
-	const cards = document.querySelectorAll('.layout-cards .grid .card');
+	const cards = document.querySelectorAll('.layout-cards .grid .card:not(.folder-card)');
 	if (!cards.length) return;
 
 	const pk = 'id';
@@ -489,6 +573,24 @@ function clearFilters() {
 async function resolveSelectedFileIds(): Promise<string[]> {
 	const ids = new Set(selection.value.map(String));
 
+	if (props.mode === 'folders' && ids.size === 0) {
+		try {
+			const res = await api.get('/files', {
+				params: {
+					limit: -1,
+					fields: ['id'],
+					filter: JSON.stringify(getFolderFilter(props.folder ?? null)),
+				},
+			});
+			for (const row of res.data?.data || []) {
+				ids.add(String(row.id));
+			}
+		} catch {
+			// empty set handled by caller
+		}
+		return Array.from(ids);
+	}
+
 	if (props.mode === 'storage' && props.storage && folderSelection.value.length) {
 		for (const folderPath of folderSelection.value) {
 			const prefix = String(folderPath || '')
@@ -581,6 +683,10 @@ async function onImported() {
 	await refresh();
 }
 
+async function onMaterialized() {
+	await refresh();
+}
+
 // Refresh list when a background (or any) migrate job finishes while this view is mounted.
 watch(migrateRunning, async (now, was) => {
 	if (was && !now) {
@@ -635,12 +741,22 @@ async function onUploadDialogFiles(files: globalThis.File[]) {
 
 watch(moveToDialogActive, (open) => {
 	if (!open) return;
-	const fallback = props.storage || storages.value[0]?.location || '';
+	moveDryRun.value = null;
+	moveIncludeEmptyFolders.value = true;
+	const others = storages.value.filter((s) => s.location !== props.storage);
+	const fallback = (moveIsWholeAdapter.value ? others[0]?.location : null) || props.storage || storages.value[0]?.location || '';
 	selectedMoveTarget.value = {
 		location: fallback,
-		path: props.mode === 'storage' ? normalizedStoragePath.value || '' : '',
+		path: moveIsWholeAdapter.value ? '' : props.mode === 'storage' ? normalizedStoragePath.value || '' : '',
 	};
 });
+
+watch(
+	() => [selectedMoveTarget.value.location, selectedMoveTarget.value.path, moveIncludeEmptyFolders.value] as const,
+	() => {
+		moveDryRun.value = null;
+	},
+);
 
 async function batchDeleteFiles() {
 	if (deletingFiles.value || !selection.value.length) return;
@@ -676,15 +792,91 @@ async function onStorageFolderDeleteDone() {
 	}
 }
 
+async function buildMoveDryRunPayload() {
+	const targetLoc = selectedMoveTarget.value.location;
+	const targetPath = selectedMoveTarget.value.path || '';
+	const sourceFolders = [...moveSourceFolders.value];
+	const preservePaths = moveIsWholeAdapter.value;
+	const payload: Record<string, unknown> = {
+		target_storage: targetLoc,
+		target_path: targetPath,
+		preserve_paths: preservePaths,
+		include_empty_folders: moveIncludeEmptyFolders.value,
+		source_folders: sourceFolders,
+	};
+	if (moveIsWholeAdapter.value) {
+		payload.source_storage = props.storage || undefined;
+	} else {
+		payload.file_ids = await resolveSelectedFileIds();
+		if (props.storage) payload.source_storage = props.storage;
+	}
+	return payload;
+}
+
+async function runMoveDryRun() {
+	if (!selectedMoveTarget.value.location || moveDryRunning.value) return;
+	moveDryRunning.value = true;
+	moveDryRun.value = null;
+	try {
+		const payload = await buildMoveDryRunPayload();
+		const resp = await api.post('/storage-manager/migrate/dry-run', payload);
+		moveDryRun.value = resp.data?.data ?? null;
+	} catch (err: any) {
+		window.alert(err?.response?.data?.errors?.[0]?.message || err?.message || 'Dry run failed');
+	} finally {
+		moveDryRunning.value = false;
+	}
+}
+
 async function moveToStorageFolder() {
 	const targetLoc = selectedMoveTarget.value.location;
 	const targetPath = selectedMoveTarget.value.path || '';
-	if (!targetLoc || !selection.value.length) return;
+	if (!targetLoc) return;
 
 	moving.value = true;
-	const fileIds = [...selection.value];
+	const sourceFolders = [...moveSourceFolders.value];
+	const preservePaths = moveIsWholeAdapter.value;
 
 	try {
+		const fileIds = moveIsWholeAdapter.value
+			? ((
+					await api.get('/files', {
+						params: {
+							limit: -1,
+							fields: ['id'],
+							filter: JSON.stringify({ storage: { _eq: props.storage } }),
+						},
+					})
+				).data?.data || []
+			).map((r: { id: string }) => String(r.id))
+			: await resolveSelectedFileIds();
+
+		if (!fileIds.length && !sourceFolders.length && !moveIsWholeAdapter.value) {
+			window.alert(
+				props.mode === 'folders' && selection.value.length === 0
+					? 'This Directus folder has no files to move.'
+					: 'No files selected.',
+			);
+			return;
+		}
+
+		if (!fileIds.length && (sourceFolders.length || moveIsWholeAdapter.value)) {
+			const resp = await api.post(`/storage-manager/storages/${encodeURIComponent(targetLoc)}/move-files`, {
+				file_ids: [],
+				target_path: targetPath,
+				source_folders: sourceFolders,
+				include_empty_folders: moveIncludeEmptyFolders.value,
+				source_storage: props.storage || undefined,
+				preserve_paths: preservePaths,
+			});
+			alertMoveSkipped(resp.data?.data?.skipped);
+			moveToDialogActive.value = false;
+			selection.value = [];
+			folderSelection.value = [];
+			await refresh();
+			return;
+		}
+
 		const res = await api.get('/files', {
 			params: {
 				limit: -1,
@@ -696,31 +888,52 @@ async function moveToStorageFolder() {
 		const needCross = rows.filter((r) => String(r.storage) !== targetLoc).map((r) => String(r.id));
 
 		if (!needCross.length) {
-			await api.post(`/storage-manager/storages/${encodeURIComponent(targetLoc)}/move-files`, {
+			const resp = await api.post(`/storage-manager/storages/${encodeURIComponent(targetLoc)}/move-files`, {
 				file_ids: fileIds,
 				target_path: targetPath,
+				source_folders: sourceFolders,
+				include_empty_folders: moveIncludeEmptyFolders.value,
+				source_storage: props.storage || undefined,
+				preserve_paths: preservePaths,
 			});
+			alertMoveSkipped(resp.data?.data?.skipped);
 			moveToDialogActive.value = false;
 			selection.value = [];
+			folderSelection.value = [];
 			await refresh();
 			return;
 		}
 
-		// Cross-adapter: migrate first (progress in migrate drawer), then place under path.
 		moveToDialogActive.value = false;
 		moving.value = false;
 
 		const migratePromise = startMigrate(
-			{ file_ids: needCross, target_storage: targetLoc, mode: 'move' },
+			{
+				file_ids: needCross,
+				target_storage: targetLoc,
+				mode: 'move',
+				target_path: targetPath,
+				source_folders: sourceFolders,
+				include_empty_folders: moveIncludeEmptyFolders.value,
+				source_storage: props.storage || undefined,
+				preserve_paths: preservePaths,
+			},
 			{ estimatedCount: needCross.length },
 		);
 		drawerOpen.value = true;
 		await migratePromise;
 
-		await api.post(`/storage-manager/storages/${encodeURIComponent(targetLoc)}/move-files`, {
-			file_ids: fileIds,
-			target_path: targetPath,
-		});
+		const alreadyOnTarget = rows.filter((r) => String(r.storage) === targetLoc).map((r) => String(r.id));
+		if (alreadyOnTarget.length) {
+			const resp = await api.post(`/storage-manager/storages/${encodeURIComponent(targetLoc)}/move-files`, {
+				file_ids: alreadyOnTarget,
+				target_path: targetPath,
+				source_folders: sourceFolders,
+				include_empty_folders: moveIncludeEmptyFolders.value,
+				preserve_paths: preservePaths,
+			});
+			alertMoveSkipped(resp.data?.data?.skipped);
+		}
 
 		selection.value = [];
 		folderSelection.value = [];
@@ -729,6 +942,15 @@ async function moveToStorageFolder() {
 		window.alert(err?.response?.data?.errors?.[0]?.message || err?.message || 'Move failed');
 	} finally {
 		moving.value = false;
+	}
+}
+
+function alertMoveSkipped(skipped: unknown) {
+	const count = Number(skipped) || 0;
+	if (count > 0) {
+		window.alert(
+			`${count.toLocaleString()} file${count === 1 ? '' : 's'} already exist at the destination and were left in place.`,
+		);
 	}
 }
 
@@ -773,6 +995,10 @@ function onFileDrawerActive(open: boolean) {
 }
 
 function onSelectAllFolders() {
+	if (props.mode === 'folders') {
+		folderSelection.value = childDirectusFolders.value.map((folder) => folder.id);
+		return;
+	}
 	if (props.mode !== 'storage') return;
 	folderSelection.value = storageFolders.value.map((f) => f.path);
 }
@@ -867,23 +1093,74 @@ function bindLayout(layoutState: Record<string, any>) {
 				/>
 
 				<v-dialog
-					v-if="canMoveSelectedFiles"
+					v-if="canMoveToStorageFolder"
 					v-model="moveToDialogActive"
 					@esc="moveToDialogActive = false"
 					@apply="moveToStorageFolder"
 				>
 					<template #activator="{ on }">
 						<header-action-button
-							v-tooltip.bottom="'Move to Storage Folder'"
+							v-tooltip.bottom="moveActionLabel"
 							icon="folder_move"
 							secondary
 							@click="on"
 						/>
 					</template>
 					<v-card>
-						<v-card-title>Move to Storage Folder</v-card-title>
+						<v-card-title>{{ moveActionLabel }}</v-card-title>
 						<v-card-text>
+							<p v-if="moveScopeHint" class="move-hint">{{ moveScopeHint }}</p>
 							<storage-target-picker v-model="selectedMoveTarget" />
+							<p v-if="moveDestinationHint" class="move-destination-hint">
+								{{ moveDestinationHint }}
+							</p>
+							<p class="move-destination-hint">
+								Existing folders are merged. If another registered file already owns the destination
+								path, the incoming file is skipped and stays on the source.
+							</p>
+							<v-checkbox
+								v-if="moveIsWholeAdapter || moveSourceFolders.length"
+								v-model="moveIncludeEmptyFolders"
+								label="Include empty folders"
+							/>
+							<div class="move-dry-run">
+								<v-button
+									secondary
+									:loading="moveDryRunning"
+									:disabled="!selectedMoveTarget.location"
+									@click="runMoveDryRun"
+								>
+									Dry Run
+								</v-button>
+								<div v-if="moveDryRun" class="move-dry-result">
+									<p>
+										<strong>{{ moveDryRun.total_files.toLocaleString() }}</strong> files
+										<template v-if="moveDryRun.total_folders">
+											· <strong>{{ moveDryRun.total_folders.toLocaleString() }}</strong>
+											{{ moveDryRun.total_folders === 1 ? 'folder' : 'folders' }}
+										</template>
+										<template v-if="moveDryRun.empty_folders">
+											<span class="move-hint">
+												({{ moveDryRun.empty_folders.toLocaleString() }} empty{{
+													moveIncludeEmptyFolders ? '' : ', skipped'
+												}})
+											</span>
+										</template>
+										<template v-if="moveDryRun.total_bytes">
+											· {{ formatBytes(moveDryRun.total_bytes) }}
+										</template>
+									</p>
+									<p v-if="moveDryRun.skipped" class="move-hint">
+										{{ moveDryRun.skipped.toLocaleString() }} already at destination — skipped
+									</p>
+									<ul v-if="moveDryRun.samples?.length" class="move-samples">
+										<li v-for="(row, i) in moveDryRun.samples" :key="i">
+											{{ row.from }} → {{ row.to }}
+											<span v-if="row.skipped"> (skipped)</span>
+										</li>
+									</ul>
+								</div>
+							</div>
 						</v-card-text>
 						<v-card-actions>
 							<v-button secondary @click="moveToDialogActive = false">Cancel</v-button>
@@ -927,37 +1204,13 @@ function bindLayout(layoutState: Record<string, any>) {
 					@done="onStorageFolderDeleteDone"
 				/>
 
-				<header-action-button
-					v-if="mode === 'storage' && nothingSelected"
-					v-tooltip.bottom="detectLabel"
-					icon="radar"
-					secondary
-					@click="openDetect"
-				/>
 
 				<header-action-button
-					v-if="canMigrateSelected"
-					v-tooltip.bottom="migrateSelectedLabel"
-					icon="swap_horiz"
+					v-if="canMaterializeFolder"
+					v-tooltip.bottom="folder ? 'Materialize This Folder' : 'Materialize Root Folders'"
+					icon="account_tree"
 					secondary
-					:loading="migrateSelectedLoading"
-					@click="openMigrate('files')"
-				/>
-
-				<header-action-button
-					v-if="canMigrateStorage"
-					v-tooltip.bottom="`Migrate ${storage}`"
-					icon="swap_horiz"
-					secondary
-					@click="openMigrate('storage')"
-				/>
-
-				<header-action-button
-					v-else-if="canMigrateFolder"
-					v-tooltip.bottom="folder ? 'Migrate This Folder' : 'Migrate Root Files'"
-					icon="folder_move"
-					secondary
-					@click="openMigrate('folder')"
+					@click="materializeOpen = true"
 				/>
 
 				<header-action-button
@@ -1016,6 +1269,17 @@ function bindLayout(layoutState: Record<string, any>) {
 					/>
 				</template>
 
+				<template
+					v-else-if="mode === 'folders' && childDirectusFolders.length && !search && !filter"
+					#prepend
+				>
+					<directus-folder-section
+						v-model:selection="folderSelection"
+						:folders="childDirectusFolders"
+						:any-file-selection="selection.length > 0"
+					/>
+				</template>
+
 				<template #no-results>
 					<v-info v-if="!filter && !search" title="No files" icon="folder" center>
 						Drop files here to upload, or use the + button.
@@ -1062,16 +1326,6 @@ function bindLayout(layoutState: Record<string, any>) {
 				<sidebar-detail id="actions" icon="swap_horiz" title="Actions">
 					<div class="sidebar-actions">
 						<v-button
-							v-if="nothingSelected"
-							secondary
-							full-width
-							class="sidebar-btn"
-							:loading="uploading"
-							@click="openUploadDialog"
-						>
-							{{ mode === 'storage' ? `Upload to ${storage}` : 'Upload Files' }}
-						</v-button>
-						<v-button
 							v-if="mode === 'storage' && nothingSelected"
 							secondary
 							full-width
@@ -1081,33 +1335,20 @@ function bindLayout(layoutState: Record<string, any>) {
 							{{ detectLabel }}
 						</v-button>
 						<v-button
-							v-if="canMigrateSelected"
-							secondary
-							full-width
-							class="sidebar-btn"
-							:loading="migrateSelectedLoading"
-							@click="openMigrate('files')"
-						>
-							{{ migrateSelectedLabel }}
-							<template v-if="selection.length || folderSelection.length">
-								({{ selection.length + folderSelection.length }})
-							</template>
-						</v-button>
-						<v-button
 							v-if="canMigrateStorage"
 							full-width
 							class="sidebar-btn sidebar-btn-primary"
-							@click="openMigrate('storage')"
+							@click="moveToDialogActive = true"
 						>
-							Migrate {{ storage }}
+							Move all on {{ storage }}
 						</v-button>
 						<v-button
-							v-else-if="canMigrateFolder"
+							v-if="canMaterializeFolder"
 							full-width
-							class="sidebar-btn sidebar-btn-primary"
-							@click="openMigrate('folder')"
+							class="sidebar-btn"
+							@click="materializeOpen = true"
 						>
-							{{ folder ? 'Migrate This Folder' : 'Migrate Root Files' }}
+							{{ folder ? 'Materialize This Folder' : 'Materialize Root Folders' }}
 						</v-button>
 					</div>
 				</sidebar-detail>
@@ -1125,8 +1366,8 @@ function bindLayout(layoutState: Record<string, any>) {
 				<sidebar-detail v-else id="directus-folders-info" icon="info" title="Directus Folders">
 					<p class="sidebar-text sidebar-note">{{ VIRTUAL_FOLDER_NOTE }}</p>
 					<p class="sidebar-text">
-						Use Move to relocate selected files across adapters, or Migrate an entire folder when
-						nothing is selected.
+						Use Move to Storage Folder to relocate files onto a physical path. Materialize builds storage
+						folders from this virtual tree. At a storage root, Move all uses the same dialog.
 					</p>
 					<v-notice v-if="multiStorageFolder" type="info" class="sidebar-multi-notice">
 						Files on {{ folderStorages.length }} storages:
@@ -1134,14 +1375,6 @@ function bindLayout(layoutState: Record<string, any>) {
 					</v-notice>
 				</sidebar-detail>
 
-				<sidebar-detail
-					v-if="mode === 'storage'"
-					id="storage-settings"
-					icon="settings"
-					title="Storage Folder Strategy"
-				>
-					<storage-settings :location="storage" />
-				</sidebar-detail>
 			</template>
 
 			<upload-files-dialog
@@ -1172,6 +1405,13 @@ function bindLayout(layoutState: Record<string, any>) {
 				@update:model-value="onDetectOpenChange"
 				@imported="onImported"
 			/>
+				<materialize-drawer
+					v-if="mode === 'folders'"
+					v-model="materializeOpen"
+					:storages="storages"
+					:folder-id="folder ?? null"
+					@done="onMaterialized"
+				/>
 		</private-view>
 	</component>
 </template>
@@ -1303,6 +1543,37 @@ function bindLayout(layoutState: Record<string, any>) {
 	margin: 0 0 24px;
 	line-height: 1.55;
 	color: var(--theme--foreground);
+}
+
+.move-hint {
+	margin: 0 0 12px;
+	line-height: 1.45;
+	color: var(--theme--foreground-subdued);
+}
+
+.move-destination-hint {
+	margin: 10px 0 0;
+	font-size: 13px;
+	color: var(--theme--foreground-subdued);
+}
+
+.move-dry-run {
+	margin-top: 16px;
+}
+
+.move-dry-result {
+	margin-top: 12px;
+	line-height: 1.5;
+}
+
+.move-samples {
+	margin: 8px 0 0;
+	padding-inline-start: 18px;
+	max-height: 180px;
+	overflow: auto;
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--theme--foreground-subdued);
 }
 
 .multi-storage-notice {

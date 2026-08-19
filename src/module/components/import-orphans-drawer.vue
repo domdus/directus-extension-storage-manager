@@ -40,9 +40,9 @@
 				<template v-else>
 					Finds files on <strong>{{ location }}</strong> that aren’t registered in Directus yet.
 				</template>
-				Import only creates database rows — nothing is copied. Titles come from the filename
-				(underscores become spaces). You can delete selected unknown files from storage.
-				Generated thumbnails are excluded.
+			Import only creates database rows — nothing is copied. Titles come from the filename
+			(underscores become spaces). You can delete selected unknown files from storage.
+			Generated thumbnails are excluded.
 			</p>
 
 			<div class="toolbar">
@@ -139,7 +139,8 @@
 				<strong>{{ location }}</strong>?
 				<br /><br />
 				Each file keeps its exact <code>filename_disk</code>. Titles are generated from the
-				filename with underscores replaced by spaces (extension stripped).
+				filename with underscores replaced by spaces (extension stripped). Image width and
+				height are read from the file so thumbnails can be generated.
 			</v-card-text>
 			<v-card-actions>
 				<v-button secondary :disabled="importing" @click="confirmOpen = false">Cancel</v-button>

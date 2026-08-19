@@ -7,9 +7,10 @@ import {
 	diskRead,
 	diskStat,
 	diskWrite,
-	getStorageManager,
 	type StorageDisk,
+	getStorageManager,
 } from './storage';
+import { copyEmptyStorageFolders, pruneEmptyLocalAncestors, relocateUnderTargetPath } from './physical-folders';
 import type {
 	MigrateFileResult,
 	MigrateMode,
@@ -29,6 +30,20 @@ export type MigrateOptions = {
 		error: (msg: string, ...args: unknown[]) => void;
 	};
 	onProgress?: (event: MigrateProgressEvent) => void;
+	keepSourceFileOnDisk?: boolean;
+	/**
+	 * When set (including `''` for storage root), write each file under that
+	 * path. Selected `sourceFolders` keep their folder name so `hello/file.jpg`
+	 * merges into existing `hello/` on the target. Loose files flatten to basename.
+	 * Omit to keep the original nested path (whole-adapter transfer).
+	 */
+	targetPath?: string;
+	sourceFolders?: string[];
+	preservePaths?: boolean;
+	includeEmptyFolders?: boolean;
+	sourceStorage?: string;
+	sourcePath?: string;
+	env?: Record<string, unknown>;
 	/** Abort when this returns true (e.g. client disconnected). */
 	isCancelled?: () => boolean;
 };
@@ -45,6 +60,31 @@ type FileRow = {
 
 function displayName(file: FileRow): string {
 	return String(file.title || file.filename_download || file.filename_disk || file.id);
+}
+
+function flattenTargetFilename(
+	filenameDisk: string,
+	targetPath: string,
+	sourceFolders?: string[],
+	preservePaths = false,
+): string {
+	return relocateUnderTargetPath(filenameDisk, targetPath, sourceFolders, preservePaths);
+}
+
+async function deleteSourceAndPruneEmptyDirs(
+	sourceDisk: StorageDisk,
+	file: FileRow,
+	env: Record<string, unknown> | undefined,
+	logger?: MigrateOptions['logger'],
+): Promise<void> {
+	await diskDeleteWithAssets(sourceDisk, file.filename_disk);
+	try {
+		await pruneEmptyLocalAncestors(file.storage, file.filename_disk, env);
+	} catch (err) {
+		logger?.warn?.(
+			`[storage-manager] Failed pruning empty folders after ${file.filename_disk}: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
 }
 
 function createByteCounter(onChunk: (bytes: number) => void): Transform {
@@ -113,7 +153,8 @@ async function migrateRelatedAssets(
 
 /**
  * Physically copy/move a single file between storage adapters, keeping the same
- * directus_files id and filename_disk. Also copies generated image transforms
+ * directus_files id. Writes to `targetFilenameDisk` when provided, otherwise
+ * keeps the source filename_disk. Also copies generated image transforms
  * (`{stem}__{hash}.ext`) when the driver supports list(). Source (and transforms)
  * are only deleted after the target is verified and the DB row is updated (move).
  */
@@ -124,10 +165,13 @@ export async function migrateOneFile(
 	database: any,
 	logger?: MigrateOptions['logger'],
 	onBytes?: (bytes: number) => void,
+	targetFilenameDisk?: string,
+	keepSourceFileOnDisk = false,
+	env?: Record<string, unknown>,
 ): Promise<MigrateFileResult> {
 	const base: MigrateFileResult = {
 		id: file.id,
-		filename_disk: file.filename_disk,
+		filename_disk: targetFilenameDisk || file.filename_disk,
 		from: file.storage,
 		to: targetStorage,
 		status: 'failed',
@@ -137,7 +181,9 @@ export async function migrateOneFile(
 		return { ...base, status: 'failed', error: 'Missing filename_disk' };
 	}
 
-	if (file.storage === targetStorage) {
+	const targetFilename = String(targetFilenameDisk || file.filename_disk || '');
+
+	if (file.storage === targetStorage && targetFilename === file.filename_disk) {
 		return { ...base, status: 'skipped', error: 'Already on target storage' };
 	}
 
@@ -150,20 +196,35 @@ export async function migrateOneFile(
 		return { ...base, status: 'failed', error: `Source object missing on ${file.storage}` };
 	}
 
-	const targetAlreadyExists = await diskExists(targetDisk, file.filename_disk);
+	const occupant = await database('directus_files')
+		.select('id')
+		.where({ storage: targetStorage, filename_disk: targetFilename })
+		.whereNot({ id: file.id })
+		.first();
+	if (occupant) {
+		return {
+			...base,
+			status: 'skipped',
+			error: 'Destination already has a file at this path — left in place',
+		};
+	}
+
+	const targetAlreadyExists = await diskExists(targetDisk, targetFilename);
 	if (targetAlreadyExists) {
 		await migrateRelatedAssets(sourceDisk, targetDisk, file.filename_disk, logger);
-		await database('directus_files').where({ id: file.id }).update({ storage: targetStorage });
-		if (mode === 'move') {
+		await database('directus_files')
+			.where({ id: file.id })
+			.update({ storage: targetStorage, filename_disk: targetFilename });
+		if (mode === 'move' && !keepSourceFileOnDisk) {
 			try {
-				await diskDeleteWithAssets(sourceDisk, file.filename_disk);
+				await deleteSourceAndPruneEmptyDirs(sourceDisk, file, env, logger);
 			} catch (err) {
 				logger?.warn?.(
 					`[storage-manager] DB updated but failed deleting source ${file.id}: ${err instanceof Error ? err.message : String(err)}`,
 				);
 			}
 		}
-		const stat = await diskStat(targetDisk, file.filename_disk).catch(() => ({ size: Number(file.filesize) || 0 }));
+		const stat = await diskStat(targetDisk, targetFilename).catch(() => ({ size: Number(file.filesize) || 0 }));
 		if (onBytes && stat.size > 0) onBytes(stat.size);
 		return {
 			...base,
@@ -176,11 +237,11 @@ export async function migrateOneFile(
 	const countedStream = onBytes ? readStream.pipe(createByteCounter(onBytes)) : readStream;
 
 	try {
-		await diskWrite(targetDisk, file.filename_disk, countedStream, file.type);
+		await diskWrite(targetDisk, targetFilename, countedStream, file.type);
 	} catch (err) {
 		try {
-			if (await diskExists(targetDisk, file.filename_disk)) {
-				await diskDeleteWithAssets(targetDisk, file.filename_disk);
+			if (await diskExists(targetDisk, targetFilename)) {
+				await diskDeleteWithAssets(targetDisk, targetFilename);
 			}
 		} catch {
 			// ignore
@@ -192,14 +253,14 @@ export async function migrateOneFile(
 		};
 	}
 
-	const verified = await diskExists(targetDisk, file.filename_disk);
+	const verified = await diskExists(targetDisk, targetFilename);
 	if (!verified) {
 		return { ...base, status: 'failed', error: 'Target write did not persist (exists check failed)' };
 	}
 
 	let targetSize = 0;
 	try {
-		const stat = await diskStat(targetDisk, file.filename_disk);
+		const stat = await diskStat(targetDisk, targetFilename);
 		targetSize = stat.size;
 	} catch (err) {
 		return {
@@ -214,7 +275,7 @@ export async function migrateOneFile(
 		const delta = Math.abs(expected - targetSize);
 		if (delta > Math.max(64, expected * 0.01) && targetSize < expected * 0.95) {
 			try {
-				await diskDeleteWithAssets(targetDisk, file.filename_disk);
+				await diskDeleteWithAssets(targetDisk, targetFilename);
 			} catch {
 				// ignore
 			}
@@ -229,10 +290,12 @@ export async function migrateOneFile(
 	await migrateRelatedAssets(sourceDisk, targetDisk, file.filename_disk, logger);
 
 	try {
-		await database('directus_files').where({ id: file.id }).update({ storage: targetStorage });
+		await database('directus_files')
+			.where({ id: file.id })
+			.update({ storage: targetStorage, filename_disk: targetFilename });
 	} catch (err) {
 		try {
-			await diskDeleteWithAssets(targetDisk, file.filename_disk);
+			await diskDeleteWithAssets(targetDisk, targetFilename);
 		} catch {
 			// ignore
 		}
@@ -243,9 +306,9 @@ export async function migrateOneFile(
 		};
 	}
 
-	if (mode === 'move') {
+	if (mode === 'move' && !keepSourceFileOnDisk) {
 		try {
-			await diskDeleteWithAssets(sourceDisk, file.filename_disk);
+			await deleteSourceAndPruneEmptyDirs(sourceDisk, file, env, logger);
 		} catch (err) {
 			logger?.warn?.(
 				`[storage-manager] Moved ${file.id} to ${targetStorage} but source delete failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -267,13 +330,53 @@ export async function migrateOneFile(
 }
 
 export async function migrateFiles(options: MigrateOptions): Promise<MigrateResponse> {
-	const { fileIds, targetStorage, mode, database, logger, onProgress, isCancelled } = options;
+	const {
+		fileIds,
+		targetStorage,
+		mode,
+		database,
+		logger,
+		onProgress,
+		isCancelled,
+		keepSourceFileOnDisk,
+		targetPath,
+		sourceFolders,
+		preservePaths,
+		includeEmptyFolders,
+		sourceStorage,
+		sourcePath,
+		env,
+	} = options;
 	const concurrency = Math.min(8, Math.max(1, Number(options.concurrency) || 3));
 	const startedAt = Date.now();
 
 	const uniqueIds = Array.from(new Set(fileIds.filter(Boolean)));
 
+	async function copyEmptyFolders(fromHint?: string | null) {
+		if (!includeEmptyFolders || !env || isCancelled?.()) return;
+		const fromStorage = sourceStorage || fromHint || null;
+		if (!fromStorage || fromStorage === targetStorage) return;
+		try {
+			await copyEmptyStorageFolders({
+				database,
+				sourceLocation: fromStorage,
+				targetLocation: targetStorage,
+				env,
+				targetPath,
+				sourceFolders,
+				sourcePath,
+				removeSource: mode === 'move' && !keepSourceFileOnDisk,
+				logger,
+			});
+		} catch (err) {
+			logger?.warn?.(
+				`[storage-manager] Empty folder copy failed: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+
 	if (uniqueIds.length === 0) {
+		await copyEmptyFolders(null);
 		const empty: MigrateResponse = {
 			mode,
 			target_storage: targetStorage,
@@ -399,8 +502,18 @@ export async function migrateFiles(options: MigrateOptions): Promise<MigrateResp
 
 			let result: MigrateFileResult;
 			try {
-				result = await migrateOneFile(file, targetStorage, mode, database, logger, (delta) =>
-					emitBytes(index, file, delta),
+				result = await migrateOneFile(
+					file,
+					targetStorage,
+					mode,
+					database,
+					logger,
+					(delta) => emitBytes(index, file, delta),
+					targetPath != null
+						? flattenTargetFilename(file.filename_disk, targetPath, sourceFolders, preservePaths)
+						: undefined,
+					Boolean(keepSourceFileOnDisk),
+					env,
 				);
 			} catch (err) {
 				result = {
@@ -446,6 +559,8 @@ export async function migrateFiles(options: MigrateOptions): Promise<MigrateResp
 		},
 		isCancelled,
 	);
+
+	await copyEmptyFolders(sourceHint);
 
 	const response: MigrateResponse = {
 		mode,

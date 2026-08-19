@@ -28,6 +28,42 @@ export function joinStoragePath(...parts: Array<string | null | undefined>): str
 		.join('/');
 }
 
+/**
+ * Place a file under `targetPath`. Selected storage folders keep their name
+ * (and nested files) so moving `hello/` into a storage root merges into
+ * existing `hello/`. Loose files still flatten to the basename unless
+ * `preservePaths` is set (whole-adapter move).
+ */
+export function relocateUnderTargetPath(
+	filenameDisk: string,
+	targetPath: string,
+	sourceFolders?: string[],
+	preservePaths = false,
+): string {
+	const dest = normalizeStoragePath(targetPath);
+	const from = normalizeStoragePath(filenameDisk);
+	if (preservePaths) {
+		if (!from) return dest;
+		return dest ? `${dest}/${from}` : from;
+	}
+	const prefixes = (sourceFolders || [])
+		.map((p) => normalizeStoragePath(p))
+		.filter(Boolean)
+		.sort((a, b) => b.length - a.length);
+
+	for (const prefix of prefixes) {
+		if (from === prefix || from.startsWith(`${prefix}/`)) {
+			const folderName = path.posix.basename(prefix);
+			const rest = from === prefix ? '' : from.slice(prefix.length + 1);
+			const relative = rest ? `${folderName}/${rest}` : folderName;
+			return dest ? `${dest}/${relative}` : relative;
+		}
+	}
+
+	const base = path.posix.basename(from);
+	return dest ? `${dest}/${base}` : base;
+}
+
 export function isKeepMarker(filename: string): boolean {
 	return path.basename(filename) === STORAGE_FOLDER_KEEP;
 }
@@ -348,6 +384,145 @@ export async function countStorageFolders(
 	}
 }
 
+export async function listStorageFolderPaths(
+	database: any,
+	location: string,
+	env: Record<string, unknown>,
+): Promise<string[]> {
+	const paths = new Set<string>();
+	for (const p of await collectAllFolderPathsFromDb(database, location)) paths.add(p);
+	for (const p of await collectAllFolderPathsFromLocalDisk(location, env)) paths.add(p);
+	for (const p of await collectAllKeepFolderPaths(location, env)) paths.add(p);
+	return Array.from(paths);
+}
+
+export async function listEmptyStorageFolders(
+	database: any,
+	location: string,
+	env: Record<string, unknown>,
+): Promise<string[]> {
+	const all = await listStorageFolderPaths(database, location, env);
+	const withFiles = new Set<string>();
+	const rows = await database('directus_files').select('filename_disk').where('storage', location);
+	for (const row of rows) {
+		const name = String(row.filename_disk || '').replace(/^[/\\]+/, '');
+		if (!name || isKeepMarker(name)) continue;
+		const dir = normalizeStoragePath(path.posix.dirname(name));
+		if (!dir || dir === '.') continue;
+		addPathPrefixes(withFiles, dir);
+	}
+	return all.filter((p) => !withFiles.has(p));
+}
+
+export function relocateFolderPath(
+	folderPath: string,
+	targetPath: string | undefined,
+	sourceFolders?: string[],
+): string {
+	const from = normalizeStoragePath(folderPath);
+	if (!from) return '';
+	if (targetPath == null) return from;
+	if (sourceFolders?.length) {
+		return relocateUnderTargetPath(`${from}/__folder__`, targetPath, sourceFolders).replace(/\/__folder__$/, '');
+	}
+	const dest = normalizeStoragePath(targetPath);
+	return dest ? `${dest}/${from}` : from;
+}
+
+export async function ensureStorageFolderPath(
+	location: string,
+	folderPath: string,
+	env: Record<string, unknown>,
+): Promise<void> {
+	const normalized = normalizeStoragePath(folderPath);
+	if (!normalized) return;
+	let parent = '';
+	for (const segment of normalized.split('/').filter(Boolean)) {
+		await createStorageFolder(location, segment, parent, env);
+		parent = joinStoragePath(parent, segment);
+	}
+}
+
+async function removeEmptyStorageFolder(
+	location: string,
+	folderPath: string,
+	env: Record<string, unknown>,
+): Promise<void> {
+	const folder = normalizeStoragePath(folderPath);
+	if (!folder) return;
+	const driver = getLocationDriver(env, location);
+	if (driver === 'local') {
+		const root = getLocationRoot(env, location);
+		if (!root) return;
+		const abs = resolveLocalAbsolute(root, folder);
+		try {
+			await fs.rm(abs, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+		return;
+	}
+	try {
+		const storage = await getStorageManager();
+		const disk = storage.location(location);
+		const keepKey = `${folder}/${STORAGE_FOLDER_KEEP}`;
+		if (await diskExists(disk, keepKey)) await diskDelete(disk, keepKey);
+	} catch {
+		// best-effort
+	}
+}
+
+function filterFoldersByScope(folders: string[], sourceFolders?: string[], sourcePath?: string): string[] {
+	if (sourceFolders?.length) {
+		const prefixes = sourceFolders.map((p) => normalizeStoragePath(p)).filter(Boolean);
+		return folders.filter((p) => prefixes.some((f) => p === f || p.startsWith(`${f}/`)));
+	}
+	if (sourcePath) {
+		const prefix = normalizeStoragePath(sourcePath);
+		if (!prefix) return folders;
+		return folders.filter((p) => p === prefix || p.startsWith(`${prefix}/`));
+	}
+	return folders;
+}
+
+export async function copyEmptyStorageFolders(params: {
+	database: any;
+	sourceLocation: string;
+	targetLocation: string;
+	env: Record<string, unknown>;
+	targetPath?: string;
+	sourceFolders?: string[];
+	sourcePath?: string;
+	removeSource?: boolean;
+	logger?: { info: (m: string) => void; warn: (m: string) => void };
+}): Promise<number> {
+	let empty = await listEmptyStorageFolders(params.database, params.sourceLocation, params.env);
+	empty = filterFoldersByScope(empty, params.sourceFolders, params.sourcePath);
+	empty.sort((a, b) => a.length - b.length);
+	let copied = 0;
+	for (const folder of empty) {
+		const dest = relocateFolderPath(folder, params.targetPath, params.sourceFolders);
+		if (!dest) continue;
+		try {
+			await ensureStorageFolderPath(params.targetLocation, dest, params.env);
+			copied += 1;
+		} catch (err: any) {
+			params.logger?.warn(`[storage-manager] Failed copying empty folder ${folder}: ${err?.message || err}`);
+		}
+	}
+	if (params.removeSource && copied) {
+		for (const folder of [...empty].sort((a, b) => b.length - a.length)) {
+			try {
+				await removeEmptyStorageFolder(params.sourceLocation, folder, params.env);
+				await pruneEmptyLocalAncestors(params.sourceLocation, `${folder}/.keep`, params.env);
+			} catch {
+				// best-effort
+			}
+		}
+	}
+	return copied;
+}
+
 export async function createStorageFolder(
 	location: string,
 	name: string,
@@ -515,15 +690,18 @@ export async function moveFilesToStoragePath(
 	fileIds: string[],
 	targetPath: string,
 	logger?: { info: (m: string) => void; warn: (m: string) => void },
+	env?: Record<string, unknown>,
+	sourceFolders?: string[],
+	preservePaths = false,
 ): Promise<{
 	moved: number;
 	failed: number;
-	results: Array<{ id: string; from: string; to: string; status: 'moved' | 'failed'; error?: string }>;
+	skipped: number;
+	results: Array<{ id: string; from: string; to: string; status: 'moved' | 'failed' | 'skipped'; error?: string }>;
 }> {
-	const target = normalizeStoragePath(targetPath);
 	const storage = await getStorageManager();
 	const disk = storage.location(location);
-	const results: Array<{ id: string; from: string; to: string; status: 'moved' | 'failed'; error?: string }> = [];
+	const results: Array<{ id: string; from: string; to: string; status: 'moved' | 'failed' | 'skipped'; error?: string }> = [];
 
 	const rows = await database('directus_files')
 		.select('id', 'storage', 'filename_disk', 'type')
@@ -533,8 +711,7 @@ export async function moveFilesToStoragePath(
 	for (const row of rows) {
 		const id = String(row.id);
 		const from = String(row.filename_disk || '');
-		const base = path.posix.basename(from);
-		const to = target ? `${target}/${base}` : base;
+		const to = relocateUnderTargetPath(from, targetPath, sourceFolders, preservePaths);
 
 		if (!from || from === to) {
 			results.push({ id, from, to, status: 'moved' });
@@ -545,14 +722,27 @@ export async function moveFilesToStoragePath(
 			if (!(await diskExists(disk, from))) {
 				throw new Error('Source object missing on storage');
 			}
-			if (await diskExists(disk, to)) {
-				throw new Error(`Target already exists: ${to}`);
+			const occupant = await database('directus_files')
+				.select('id')
+				.where({ storage: location, filename_disk: to })
+				.whereNot({ id })
+				.first();
+			if (occupant) {
+				results.push({
+					id,
+					from,
+					to,
+					status: 'skipped',
+					error: 'Destination already has a file at this path — left in place',
+				});
+				continue;
 			}
-
-			const stream = await diskRead(disk, from);
-			await diskWrite(disk, to, stream, row.type);
 			if (!(await diskExists(disk, to))) {
-				throw new Error('Write verification failed');
+				const stream = await diskRead(disk, from);
+				await diskWrite(disk, to, stream, row.type);
+				if (!(await diskExists(disk, to))) {
+					throw new Error('Write verification failed');
+				}
 			}
 
 			// AssetsService keeps transforms at storage root by basename — leave those alone.
@@ -572,6 +762,7 @@ export async function moveFilesToStoragePath(
 
 			await diskDelete(disk, from);
 			await database('directus_files').where('id', id).update({ filename_disk: to });
+			await pruneEmptyLocalAncestors(location, from, env);
 			results.push({ id, from, to, status: 'moved' });
 			logger?.info(`[storage-manager] Moved ${from} → ${to} on ${location}`);
 		} catch (err: any) {
@@ -583,6 +774,7 @@ export async function moveFilesToStoragePath(
 	return {
 		moved: results.filter((r) => r.status === 'moved').length,
 		failed: results.filter((r) => r.status === 'failed').length,
+		skipped: results.filter((r) => r.status === 'skipped').length,
 		results,
 	};
 }
@@ -620,6 +812,30 @@ function parentStoragePath(folderPath: string): string {
 	const normalized = normalizeStoragePath(folderPath);
 	const idx = normalized.lastIndexOf('/');
 	return idx === -1 ? '' : normalized.slice(0, idx);
+}
+
+/** Remove empty local directories left after a file is moved out of a nested path. */
+export async function pruneEmptyLocalAncestors(
+	location: string,
+	filePath: string,
+	env?: Record<string, unknown>,
+): Promise<void> {
+	if (!env || getLocationDriver(env, location) !== 'local') return;
+	const root = getLocationRoot(env, location);
+	if (!root) return;
+
+	let current = parentStoragePath(filePath);
+	while (current) {
+		const abs = resolveLocalAbsolute(root, current);
+		try {
+			const entries = await fs.readdir(abs);
+			if (entries.length > 0) return;
+			await fs.rmdir(abs);
+		} catch {
+			return;
+		}
+		current = parentStoragePath(current);
+	}
 }
 
 async function storageFolderExists(

@@ -22,6 +22,8 @@ export type StorageLocationInfo = StorageUsage & {
 	bucket: string | null;
 	/** Physical storage folders discovered under this adapter. */
 	folder_count: number;
+	/** When true, new uploads and folder rename/delete follow the Directus folder tree on this adapter. */
+	mirror_directus_folders: boolean;
 };
 
 export type FileRow = {
@@ -49,6 +51,8 @@ export type FolderNode = {
 export type MigrateRequest = {
 	target_storage: string;
 	mode: MigrateMode;
+	/** Keep source file on disk as orphan after successful cross-storage transfer. */
+	keep_source_file_on_disk?: boolean;
 	/** Explicit file IDs. */
 	file_ids?: string[];
 	/** Migrate all files currently on this source storage. */
@@ -87,6 +91,28 @@ export type MigrateResponse = {
 	elapsed_ms?: number;
 	/** True when the user aborted the job (not a hard failure). */
 	cancelled?: boolean;
+};
+
+export type MaterializeMode = 'preserve' | 'merge';
+
+export type MaterializeDryRunRequest = {
+	folder_id: string | null;
+	mode: MaterializeMode;
+	target_storage?: string;
+	structure_only?: boolean;
+};
+
+export type MaterializeDryRunResponse = {
+	folder_id: string | null;
+	mode: MaterializeMode;
+	target_storage?: string | null;
+	structure_only: boolean;
+	total_files: number;
+	total_folders: number;
+	total_bytes: number;
+	conflicts: number;
+	samples: Array<{ id: string; from: string; to_storage: string; to_path: string }>;
+	by_storage: Array<{ storage: string; files: number; bytes: number }>;
 };
 
 // ── Storage Manager Settings (stored in directus_settings.storage_manager) ──
