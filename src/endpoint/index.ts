@@ -16,12 +16,10 @@ import {
 	deleteStorageFolders,
 	ensureFileUnderPath,
 	joinStoragePath,
-	listEmptyStorageFolders,
 	listStorageFolderPaths,
 	moveFilesToStoragePath,
 	moveStorageFolder,
 	normalizeStoragePath,
-	relocateFolderPath,
 	relocateStorageFolder,
 	relocateUnderTargetPath,
 	renameStorageFolder,
@@ -81,21 +79,40 @@ async function collectFolderIds(database: any, rootId: string | null, recursive:
 	return result;
 }
 
-async function resolveFileIds(
-	database: any,
-	body: {
-		file_ids?: string[];
-		source_storage?: string;
-		source_path?: string;
-		folder_id?: string | null;
-		recursive?: boolean;
-	},
-): Promise<string[]> {
-	if (Array.isArray(body.file_ids) && body.file_ids.length > 0) {
-		return body.file_ids.map(String);
-	}
+type FileScopeBody = {
+	file_ids?: string[];
+	source_storage?: string;
+	source_path?: string;
+	source_folders?: string[];
+	folder_id?: string | null;
+	recursive?: boolean;
+};
 
-	const query = database('directus_files').select('id');
+function applySourceFolderPrefixes(query: any, folders: string[]) {
+	const prefixes = folders.map((p) => normalizeStoragePath(p)).filter(Boolean);
+	if (!prefixes.length) return;
+	query.where(function (this: any) {
+		for (const prefix of prefixes) {
+			this.orWhere('filename_disk', prefix).orWhere('filename_disk', 'like', `${prefix}/%`);
+		}
+	});
+}
+
+async function applyFileScope(query: any, database: any, body: FileScopeBody): Promise<void> {
+	const fileIds = Array.isArray(body.file_ids) ? body.file_ids.map(String).filter(Boolean) : [];
+	const sourceFolders = Array.isArray(body.source_folders) ? body.source_folders.map(String) : [];
+
+	if (fileIds.length && sourceFolders.length) {
+		query.where(function (this: any) {
+			this.whereIn('id', fileIds).orWhere(function (this: any) {
+				applySourceFolderPrefixes(this, sourceFolders);
+			});
+		});
+	} else if (fileIds.length) {
+		query.whereIn('id', fileIds);
+	} else if (sourceFolders.length) {
+		applySourceFolderPrefixes(query, sourceFolders);
+	}
 
 	if (body.source_storage) {
 		query.where('storage', String(body.source_storage));
@@ -104,11 +121,11 @@ async function resolveFileIds(
 	const sourcePath = body.source_path != null ? normalizeStoragePath(String(body.source_path)) : '';
 	if (sourcePath) {
 		if (!body.source_storage) {
-			return [];
+			query.whereRaw('1 = 0');
+			return;
 		}
 		const prefix = `${sourcePath}/`;
 		if (body.recursive === false) {
-			// Immediate files only: under prefix, but not in nested subfolders.
 			query.where('filename_disk', 'like', `${prefix}%`).whereNot('filename_disk', 'like', `${prefix}%/%`);
 		} else {
 			query.where('filename_disk', 'like', `${prefix}%`);
@@ -127,9 +144,98 @@ async function resolveFileIds(
 			}
 		}
 	}
+}
 
+async function resolveFileIds(database: any, body: FileScopeBody): Promise<string[]> {
+	if (Array.isArray(body.file_ids) && body.file_ids.length > 0) {
+		return body.file_ids.map(String);
+	}
+
+	const query = database('directus_files').select('id');
+	await applyFileScope(query, database, { ...body, file_ids: undefined });
 	const rows = await query;
 	return rows.map((r: { id: string }) => String(r.id));
+}
+
+const DRY_RUN_SAMPLE = 20;
+
+function dbClientName(database: any): string {
+	return String(database?.client?.config?.client || database?.client?.dialect || '').toLowerCase();
+}
+
+function sqlBasename(database: any, columnSql: string): string {
+	const client = dbClientName(database);
+	if (client.includes('pg') || client.includes('cockroach')) {
+		return `regexp_replace(${columnSql}, '^.*/', '')`;
+	}
+	if (client.includes('mysql')) {
+		return `SUBSTRING_INDEX(${columnSql}, '/', -1)`;
+	}
+	if (client.includes('mssql')) {
+		return `CASE WHEN CHARINDEX('/', ${columnSql}) = 0 THEN ${columnSql} ELSE RIGHT(${columnSql}, CHARINDEX('/', REVERSE(${columnSql})) - 1) END`;
+	}
+	return '';
+}
+
+/** Count source rows whose destination filename_disk is already owned by another file. */
+async function countOccupantSkips(
+	database: any,
+	scoped: any,
+	target: string,
+	destPrefix: string,
+	preservePaths: boolean,
+	sourceFolders: string[],
+): Promise<number | null> {
+	if (sourceFolders.length && !preservePaths) return null;
+
+	const dest = normalizeStoragePath(destPrefix);
+	let destExpr: string;
+	const bindings: unknown[] = [];
+
+	if (preservePaths) {
+		if (dest) {
+			destExpr = dbClientName(database).includes('sqlite')
+				? `? || '/' || src.filename_disk`
+				: `CONCAT(?, '/', src.filename_disk)`;
+			bindings.push(dest);
+		} else {
+			destExpr = 'src.filename_disk';
+		}
+	} else {
+		const base = sqlBasename(database, 'src.filename_disk');
+		if (!base) return null;
+		if (dest) {
+			destExpr = dbClientName(database).includes('sqlite')
+				? `? || '/' || (${base})`
+				: `CONCAT(?, '/', ${base})`;
+			bindings.push(dest);
+		} else {
+			destExpr = base;
+		}
+	}
+
+	try {
+		const src = scoped.clone().clearSelect().select('id', 'filename_disk').as('src');
+		const row = await database
+			.from(src)
+			.joinRaw(
+				`inner join directus_files as occ on occ.storage = ? and occ.id <> src.id and occ.filename_disk = ${destExpr}`,
+				[target, ...bindings],
+			)
+			.count('* as n')
+			.first();
+		return Number(row?.n ?? 0);
+	} catch {
+		return null;
+	}
+}
+
+function numericAgg(row: Record<string, unknown> | undefined, keys: string[]): number {
+	if (!row) return 0;
+	for (const key of keys) {
+		if (row[key] != null && row[key] !== '') return Number(row[key]) || 0;
+	}
+	return 0;
 }
 
 function parseFilterParam(raw: unknown): Record<string, unknown> | null {
@@ -817,21 +923,15 @@ export default {
 			}
 		});
 
-		/** Dry-run: count files, folders, and destination conflicts without moving anything. */
+		/** Dry-run: SQL counts plus a small sample — never loads every file into Node. */
 		router.post('/migrate/dry-run', async (req: Request, res: Response, next: NextFunction) => {
 			try {
 				if (!requireAdmin(req, res)) return;
 
-				const body = (req.body || {}) as {
+				const body = (req.body || {}) as FileScopeBody & {
 					target_storage?: string;
 					target_path?: string;
 					preserve_paths?: boolean;
-					source_folders?: string[];
-					file_ids?: string[];
-					source_storage?: string;
-					source_path?: string;
-					folder_id?: string | null;
-					recursive?: boolean;
 				};
 
 				const target = String(body.target_storage || '').trim();
@@ -841,29 +941,37 @@ export default {
 					return;
 				}
 
+				const fileIds = Array.isArray(body.file_ids) ? body.file_ids.map(String).filter(Boolean) : [];
+				const sourceFolders = Array.isArray(body.source_folders) ? body.source_folders.map(String) : [];
+				const hasScope =
+					fileIds.length > 0 ||
+					Boolean(body.source_storage) ||
+					body.folder_id !== undefined ||
+					sourceFolders.length > 0;
+				if (!hasScope) {
+					res.status(400).json({ errors: [{ message: 'Provide file_ids, source_storage, or folder_id' }] });
+					return;
+				}
+
 				const targetPath = body.target_path != null ? String(body.target_path) : '';
 				const preservePaths = Boolean(body.preserve_paths);
-				const sourceFolders = Array.isArray(body.source_folders) ? body.source_folders.map(String) : [];
-				const fileIds = await resolveFileIds(database, body);
 
-				const rows: Array<{
+				const scoped = database('directus_files');
+				await applyFileScope(scoped, database, body);
+
+				const stats = await scoped.clone().clearSelect().count('* as n').sum('filesize as bytes').first();
+				const total_files = numericAgg(stats, ['n', 'count']);
+				const total_bytes = numericAgg(stats, ['bytes', 'sum']);
+
+				const sampleRows: Array<{
 					id: string;
 					storage: string;
-					filesize: number | null;
 					filename_disk: string | null;
-				}> = fileIds.length
-					? await database('directus_files')
-						.select('id', 'storage', 'filesize', 'filename_disk')
-						.whereIn('id', fileIds)
-					: [];
+				}> = await scoped.clone().clearSelect().select('id', 'storage', 'filename_disk').limit(DRY_RUN_SAMPLE);
 
-				const destFolders = new Set<string>();
-				const samples: Array<{ from: string; to: string; skipped: boolean }> = [];
-				const planned = rows.map((row) => {
+				const planned = sampleRows.map((row) => {
 					const from = String(row.filename_disk || '');
 					const to = relocateUnderTargetPath(from, targetPath, sourceFolders, preservePaths);
-					const dir = normalizeStoragePath(to.includes('/') ? to.slice(0, to.lastIndexOf('/')) : '');
-					if (dir) destFolders.add(dir);
 					return { id: String(row.id), storage: String(row.storage), from, to };
 				});
 
@@ -879,47 +987,31 @@ export default {
 					occupantByPath.set(String(occupant.filename_disk), String(occupant.id));
 				}
 
-				let skipped = 0;
+				const samples: Array<{ from: string; to: string; skipped: boolean }> = [];
 				for (const item of planned) {
 					const occupantId = occupantByPath.get(item.to);
-					const isSkipped = Boolean(occupantId && occupantId !== item.id);
-					if (isSkipped) skipped += 1;
-					if (samples.length < 20) {
-						samples.push({
-							from: `${item.storage}:${item.from}`,
-							to: `${target}:${item.to}`,
-							skipped: isSkipped,
-						});
-					}
+					samples.push({
+						from: `${item.storage}:${item.from}`,
+						to: `${target}:${item.to}`,
+						skipped: Boolean(occupantId && occupantId !== item.id),
+					});
 				}
 
-				let empty_folders = 0;
-				const sourceStorage = body.source_storage ? String(body.source_storage) : '';
-				if (sourceStorage && locations.includes(sourceStorage)) {
-					const sourcePath = body.source_path != null ? normalizeStoragePath(String(body.source_path)) : '';
-					const empty = (await listEmptyStorageFolders(database, sourceStorage, env)).filter((p) => {
-						if (sourceFolders.length) {
-							return sourceFolders.some((f) => {
-								const prefix = normalizeStoragePath(f);
-								return p === prefix || p.startsWith(`${prefix}/`);
-							});
-						}
-						if (sourcePath) return p === sourcePath || p.startsWith(`${sourcePath}/`);
-						return true;
-					});
-					empty_folders = empty.length;
-					for (const folder of empty) {
-						const dest = relocateFolderPath(folder, targetPath, sourceFolders.length ? sourceFolders : undefined);
-						if (dest) destFolders.add(dest);
-					}
-				}
+				const skipped = await countOccupantSkips(
+					database,
+					scoped,
+					target,
+					targetPath,
+					preservePaths,
+					sourceFolders,
+				);
 
 				res.json({
 					data: {
-						total_files: rows.length,
-						total_folders: destFolders.size,
-						empty_folders,
-						total_bytes: rows.reduce((sum, r) => sum + (Number(r.filesize) || 0), 0),
+						total_files,
+						total_folders: 0,
+						empty_folders: 0,
+						total_bytes,
 						skipped,
 						samples,
 					},

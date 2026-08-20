@@ -72,7 +72,7 @@ const moveDryRun = ref<{
 	total_folders: number;
 	empty_folders: number;
 	total_bytes: number;
-	skipped: number;
+	skipped: number | null;
 	samples: Array<{ from: string; to: string; skipped: boolean }>;
 } | null>(null);
 
@@ -847,8 +847,14 @@ async function buildMoveDryRunPayload() {
 	};
 	if (moveIsWholeAdapter.value) {
 		payload.source_storage = props.storage || undefined;
+	} else if (props.mode === 'storage' && folderSelection.value.length) {
+		payload.source_storage = props.storage || undefined;
+		if (selection.value.length) payload.file_ids = selection.value.map(String);
+	} else if (props.mode === 'folders' && selection.value.length === 0) {
+		payload.folder_id = props.folder ?? null;
+		payload.recursive = true;
 	} else {
-		payload.file_ids = await resolveSelectedFileIds();
+		payload.file_ids = selection.value.map(String);
 		if (props.storage) payload.source_storage = props.storage;
 	}
 	return payload;
@@ -1186,6 +1192,16 @@ function bindLayout(layoutState: Record<string, any>) {
 											<span v-if="row.skipped"> (skipped)</span>
 										</li>
 									</ul>
+									<p
+										v-if="
+											moveDryRun.samples?.length &&
+											moveDryRun.total_files > moveDryRun.samples.length
+										"
+										class="move-hint"
+									>
+										Showing {{ moveDryRun.samples.length }} of
+										{{ moveDryRun.total_files.toLocaleString() }} files
+									</p>
 								</div>
 							</div>
 						</v-card-text>
