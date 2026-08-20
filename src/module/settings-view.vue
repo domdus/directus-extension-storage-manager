@@ -33,6 +33,15 @@
 			<div class="actions">
 				<v-button secondary :loading="checkingUpdates" @click="checkUpdates(true)">Check now</v-button>
 			</div>
+			<p class="links">
+				<a :href="EXTENSION_NPM_URL" target="_blank" rel="noopener noreferrer">npm</a>
+				·
+				<a :href="EXTENSION_GITHUB_URL" target="_blank" rel="noopener noreferrer">GitHub</a>
+				<template v-if="marketplaceUrl">
+					·
+					<a :href="marketplaceUrl">Marketplace</a>
+				</template>
+			</p>
 			<div v-if="updateInfo" class="result">
 				<v-notice :type="updateNoticeType">
 					Current: <strong>{{ updateInfo.current_version }}</strong>
@@ -43,15 +52,6 @@
 					<template v-else-if="updateInfo.has_update"> · Update available</template>
 					<template v-else> · Up to date</template>
 				</v-notice>
-				<p class="links">
-					<a :href="updateInfo.links.npm" target="_blank" rel="noopener noreferrer">npm</a>
-					·
-					<a :href="updateInfo.links.github" target="_blank" rel="noopener noreferrer">GitHub</a>
-					<template v-if="updateInfo.links.marketplace">
-						·
-						<a :href="updateInfo.links.marketplace">Marketplace</a>
-					</template>
-				</p>
 			</div>
 
 			<v-divider
@@ -146,9 +146,19 @@ import { useApi } from '@directus/extensions-sdk';
 import { useStorageSettingsAdmin } from './composables/use-storage-settings-admin';
 import { usePageClass } from './composables/use-page-class';
 import ModuleNavigation from './navigation.vue';
+import {
+	EXTENSION_GITHUB_URL,
+	EXTENSION_MARKETPLACE_UID,
+	EXTENSION_NPM_URL,
+} from '../shared/extension-meta';
 
 const pageClass = usePageClass();
 const api = useApi();
+const marketplaceUrl = computed(() =>
+	EXTENSION_MARKETPLACE_UID
+		? `/admin/settings/marketplace/extension/${EXTENSION_MARKETPLACE_UID}`
+		: null,
+);
 
 const {
 	loading,
@@ -198,7 +208,11 @@ async function checkUpdates(force: boolean) {
 			has_update: false,
 			checked_at: new Date().toISOString(),
 			error: error?.response?.data?.errors?.[0]?.message || error?.message || 'Update check failed',
-			links: { npm: '#', github: '#', marketplace: null },
+			links: {
+				npm: EXTENSION_NPM_URL,
+				github: EXTENSION_GITHUB_URL,
+				marketplace: marketplaceUrl.value,
+			},
 		};
 	} finally {
 		checkingUpdates.value = false;

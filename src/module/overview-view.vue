@@ -67,10 +67,11 @@
 						<div class="card-strategy">
 							<div class="mirror-copy">
 								<strong>Mirror Directus Folders</strong>
-								<span>
-									New uploads and folder rename/delete follow the Directus folder tree on this
-									adapter.
-								</span>
+								<v-icon
+									v-tooltip.bottom="'New uploads and folder rename/delete follow the Directus folder tree on this adapter.'"
+									name="help_outline"
+									small
+								/>
 							</div>
 							<v-checkbox
 								:model-value="storage.mirror_directus_folders"
@@ -312,7 +313,7 @@ onMounted(refresh);
 
 .card-strategy {
 	display: flex;
-	align-items: flex-start;
+	align-items: center;
 	justify-content: space-between;
 	gap: 12px;
 	padding-block-start: 12px;
@@ -321,8 +322,8 @@ onMounted(refresh);
 
 .mirror-copy {
 	display: flex;
-	flex-direction: column;
-	gap: 4px;
+	align-items: center;
+	gap: 6px;
 	min-width: 0;
 	flex: 1;
 }
@@ -331,10 +332,9 @@ onMounted(refresh);
 	font-size: 13px;
 }
 
-.mirror-copy span {
-	font-size: 12px;
-	line-height: 1.4;
-	color: var(--theme--foreground-subdued);
+.mirror-copy .v-icon {
+	--v-icon-color: var(--theme--foreground-subdued);
+	cursor: pointer;
 }
 
 .strategy-label {

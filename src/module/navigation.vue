@@ -222,7 +222,7 @@ function setOpenStorageFolders() {
 }
 
 .section-label {
-	padding: 12px 12px 4px;
+	padding: 4px 12px 4px;
 	font-size: 11px;
 	font-weight: 700;
 	letter-spacing: 0.04em;
