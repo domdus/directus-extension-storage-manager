@@ -22,7 +22,7 @@ const emit = defineEmits<{
 }>();
 
 const { storages, loadStorages } = useStorageManager();
-const { trees, loading, loadTrees } = useStorageFolderTrees();
+const { trees, loading, loadTree } = useStorageFolderTrees();
 
 const openFolders = ref<string[]>([]);
 
@@ -61,14 +61,16 @@ function isActive(location: string, path: string) {
 
 async function ensureTrees() {
 	await loadStorages().catch(() => undefined);
-	const locs = storages.value.map((s) => s.location);
-	if (locs.length) await loadTrees(locs);
 }
 
 watch(
-	locations,
-	(locs) => {
-		if (locs.length) void loadTrees(locs);
+	openFolders,
+	(open) => {
+		for (const key of open) {
+			if (typeof key !== 'string' || !key.startsWith('@')) continue;
+			const loc = key.slice(1);
+			if (loc && trees.value[loc] === undefined) void loadTree(loc);
+		}
 	},
 	{ deep: true },
 );

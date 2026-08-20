@@ -1,10 +1,36 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
-	EXTENSION_CURRENT_VERSION,
 	EXTENSION_GITHUB_URL,
 	EXTENSION_MARKETPLACE_UID,
 	EXTENSION_NPM_URL,
 	EXTENSION_PACKAGE_NAME,
 } from '../shared/extension-meta';
+
+function readInstalledVersion(): string {
+	const candidates: string[] = [];
+	try {
+		candidates.push(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'package.json'));
+	} catch {
+		// bundled environment without import.meta.url
+	}
+	candidates.push(
+		path.resolve(process.cwd(), 'extensions', EXTENSION_PACKAGE_NAME, 'package.json'),
+		path.resolve(process.cwd(), 'package.json'),
+	);
+
+	for (const file of candidates) {
+		try {
+			const pkg = JSON.parse(fs.readFileSync(file, 'utf8')) as { name?: string; version?: string };
+			if (pkg.name === EXTENSION_PACKAGE_NAME && pkg.version) return String(pkg.version);
+		} catch {
+			// try next path
+		}
+	}
+
+	return 'unknown';
+}
 
 type UpdateCheckResponse = {
 	current_version: string;
@@ -80,7 +106,7 @@ function marketplaceUrl(basePath = ''): string | null {
 export async function checkForUpdates(force = false): Promise<UpdateCheckResponse> {
 	if (!force && cache && Date.now() < cache.expiresAt) return cache.data;
 
-	const currentVersion = normalizeVersion(EXTENSION_CURRENT_VERSION);
+	const currentVersion = normalizeVersion(readInstalledVersion());
 	const links = {
 		npm: EXTENSION_NPM_URL,
 		github: EXTENSION_GITHUB_URL,

@@ -154,24 +154,57 @@ async function collectImmediateFoldersFromDb(
 	location: string,
 	parentPath: string,
 ): Promise<Set<string>> {
-	const folders = new Set<string>();
 	const parent = normalizeStoragePath(parentPath);
-	const rows = await database('directus_files').select('filename_disk').where('storage', location);
 	const prefix = parent ? `${parent}/` : '';
+	const client = String(
+		database?.client?.config?.client || database?.client?.driverName || database?.client?.dialect || '',
+	).toLowerCase();
+	const start = prefix.length + 1;
 
-	for (const row of rows) {
-		const name = String(row.filename_disk || '').replace(/^[/\\]+/, '');
-		if (!name) continue;
-		if (prefix && !name.startsWith(prefix)) continue;
-		const rest = prefix ? name.slice(prefix.length) : name;
-		const slash = rest.indexOf('/');
-		if (slash <= 0) continue;
-		const segment = rest.slice(0, slash);
-		if (!segment || segment.startsWith('.')) continue;
-		folders.add(segment);
+	try {
+		let rows: Array<{ segment?: string }> = [];
+
+		const scoped = database('directus_files').where('storage', location).whereNotNull('filename_disk');
+		if (prefix) {
+			scoped.where('filename_disk', 'like', `${prefix}%`);
+		} else {
+			scoped.where('filename_disk', 'like', '%/%');
+		}
+
+		if (client.includes('pg') || client.includes('cockroach')) {
+			const rest = prefix ? `substring(filename_disk from ${start})` : 'filename_disk';
+			rows = await scoped
+				.whereRaw(`${rest} like ?`, ['%/%'])
+				.select(database.raw(`DISTINCT split_part(${rest}, '/', 1) as segment`));
+		} else if (client.includes('mysql') || client.includes('maria')) {
+			const rest = prefix ? `SUBSTRING(filename_disk, ${start})` : 'filename_disk';
+			rows = await scoped
+				.whereRaw(`${rest} like ?`, ['%/%'])
+				.select(database.raw(`DISTINCT SUBSTRING_INDEX(${rest}, '/', 1) as segment`));
+		} else if (client.includes('sqlite')) {
+			const rest = prefix ? `substr(filename_disk, ${start})` : 'filename_disk';
+			rows = await scoped
+				.whereRaw(`instr(${rest}, '/') > 0`)
+				.select(database.raw(`DISTINCT substr(${rest}, 1, instr(${rest}, '/') - 1) as segment`));
+		} else if (client.includes('mssql')) {
+			const rest = prefix ? `SUBSTRING(filename_disk, ${start}, 4000)` : 'filename_disk';
+			rows = await scoped
+				.whereRaw(`CHARINDEX('/', ${rest}) > 0`)
+				.select(database.raw(`DISTINCT LEFT(${rest}, CHARINDEX('/', ${rest}) - 1) as segment`));
+		} else {
+			return new Set();
+		}
+
+		const folders = new Set<string>();
+		for (const row of rows) {
+			const segment = String(row.segment || '').trim();
+			if (!segment || segment.startsWith('.') || segment.includes('/') || segment.includes('\\')) continue;
+			folders.add(segment);
+		}
+		return folders;
+	} catch {
+		return new Set();
 	}
-
-	return folders;
 }
 
 /** Also pick up empty cloud folders that only contain `.keep`. */
@@ -349,17 +382,14 @@ export function nestStorageFolderPaths(paths: string[]): StorageFolderNode[] {
 	return roots;
 }
 
-/** Full nested folder tree for left-nav (File Library folders parity). */
+/** Immediate-child tree for pickers/nav — never walks the full disk or loads every filename_disk. */
 export async function browseStorageFolderTree(
 	database: any,
 	location: string,
 	env: Record<string, unknown>,
 ): Promise<StorageFolderNode[]> {
-	const paths = new Set<string>();
-	for (const p of await collectAllFolderPathsFromDb(database, location)) paths.add(p);
-	for (const p of await collectAllFolderPathsFromLocalDisk(location, env)) paths.add(p);
-	for (const p of await collectAllKeepFolderPaths(location, env)) paths.add(p);
-	return nestStorageFolderPaths(Array.from(paths));
+	const { folders } = await browseStorageFolders(database, location, '', env);
+	return folders.map((folder) => ({ name: folder.name, path: folder.path }));
 }
 
 export function countFolderNodes(nodes: StorageFolderNode[]): number {
@@ -377,8 +407,8 @@ export async function countStorageFolders(
 	env: Record<string, unknown>,
 ): Promise<number> {
 	try {
-		const tree = await browseStorageFolderTree(database, location, env);
-		return countFolderNodes(tree);
+		const { folders } = await browseStorageFolders(database, location, '', env);
+		return folders.length;
 	} catch {
 		return 0;
 	}

@@ -17,7 +17,7 @@ const route = useRoute();
 const router = useRouter();
 const { nestedFolders, folders, loading, openFolders } = useFolders();
 const { storages, loadStorages } = useStorageManager();
-const { trees, openFolders: openStorageFolders, loadTrees } = useStorageFolderTrees();
+const { trees, openFolders: openStorageFolders } = useStorageFolderTrees();
 
 const currentFolder = computed(() => {
 	if (!route.path.startsWith('/storage-manager/folders')) return undefined;
@@ -47,14 +47,6 @@ const isSettings = computed(() => route.path.startsWith('/storage-manager/settin
 
 watch([currentFolder, loading, folders], setOpenFolders, { immediate: true });
 watch([currentStorage, currentStoragePath, trees], setOpenStorageFolders, { immediate: true, deep: true });
-
-watch(
-	storages,
-	(list) => {
-		if (list?.length) void loadTrees(list.map((s) => s.location));
-	},
-	{ immediate: true },
-);
 
 onMounted(() => {
 	loadStorages().catch(() => undefined);

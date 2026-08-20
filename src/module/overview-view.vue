@@ -55,7 +55,7 @@
 
 						<div class="meta">
 							<span class="tag">{{ storage.file_count.toLocaleString() }} files</span>
-							<span class="tag">{{ (storage.folder_count ?? 0).toLocaleString() }} folders</span>
+							<span v-if="storage.folder_count" class="tag">{{ storage.folder_count.toLocaleString() }} folders</span>
 							<span
 								v-if="storage.root"
 								class="tag tag-path"

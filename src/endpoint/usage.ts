@@ -84,27 +84,47 @@ export async function aggregateFileUsage(
 	database: any,
 	location: string,
 ): Promise<{ file_count: number; total_bytes: number }> {
-	const row = await database('directus_files')
-		.where({ storage: location })
+	const grouped = await aggregateFileUsageGrouped(database, [location]);
+	return grouped.get(location) || { file_count: 0, total_bytes: 0 };
+}
+
+/** One scan of directus_files instead of one COUNT/SUM per location. */
+export async function aggregateFileUsageGrouped(
+	database: any,
+	locations: string[],
+): Promise<Map<string, { file_count: number; total_bytes: number }>> {
+	const map = new Map<string, { file_count: number; total_bytes: number }>();
+	for (const location of locations) {
+		map.set(location, { file_count: 0, total_bytes: 0 });
+	}
+	if (!locations.length) return map;
+
+	const rows = await database('directus_files')
+		.whereIn('storage', locations)
+		.select('storage')
 		.select(
 			database.raw('count(*) as file_count'),
 			database.raw('coalesce(sum(filesize), 0) as total_bytes'),
 		)
-		.first();
+		.groupBy('storage');
 
-	return {
-		file_count: Number(row?.file_count || 0),
-		total_bytes: Number(row?.total_bytes || 0),
-	};
+	for (const row of rows || []) {
+		map.set(String(row.storage), {
+			file_count: Number(row.file_count || 0),
+			total_bytes: Number(row.total_bytes || 0),
+		});
+	}
+	return map;
 }
 
 export async function buildStorageUsage(
 	env: EnvLike,
 	database: any,
 	location: string,
+	precomputed?: { file_count: number; total_bytes: number },
 ): Promise<StorageUsage> {
 	const driver = getLocationDriver(env, location);
-	const { file_count, total_bytes } = await aggregateFileUsage(database, location);
+	const { file_count, total_bytes } = precomputed || (await aggregateFileUsage(database, location));
 
 	let disk = {
 		disk_total_bytes: null as number | null,
@@ -131,8 +151,9 @@ export async function buildStorageLocationInfo(
 	env: EnvLike,
 	database: any,
 	location: string,
+	precomputed?: { file_count: number; total_bytes: number },
 ): Promise<StorageLocationInfo> {
-	const usage = await buildStorageUsage(env, database, location);
+	const usage = await buildStorageUsage(env, database, location, precomputed);
 	const meta = getDriverMeta(usage.driver);
 
 	return {
