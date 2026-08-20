@@ -32,16 +32,14 @@
 			</p>
 			<div class="actions">
 				<v-button secondary :loading="checkingUpdates" @click="checkUpdates(true)">Check now</v-button>
+				<v-button
+					v-if="updateInfo?.has_update && marketplaceUrl"
+					secondary
+					:to="marketplaceUrl"
+				>
+					Marketplace
+				</v-button>
 			</div>
-			<p class="links">
-				<a :href="EXTENSION_NPM_URL" target="_blank" rel="noopener noreferrer">npm</a>
-				·
-				<a :href="EXTENSION_GITHUB_URL" target="_blank" rel="noopener noreferrer">GitHub</a>
-				<template v-if="marketplaceUrl">
-					·
-					<a :href="marketplaceUrl">Marketplace</a>
-				</template>
-			</p>
 			<div v-if="updateInfo" class="result">
 				<v-notice :type="updateNoticeType">
 					Current: <strong>{{ updateInfo.current_version }}</strong>
@@ -288,11 +286,6 @@ async function runCleanup() {
 
 .section-divider.add-margin-top {
 	margin-top: 40px;
-}
-
-.links {
-	margin: 8px 0 0;
-	font-size: 13px;
 }
 
 .explain,
