@@ -397,22 +397,66 @@ async function refreshFolderStorages() {
 	}
 }
 
-const CARD_STORAGE_BADGE_CLASS = 'storage-location-badge';
+const STORAGE_BADGE_CLASS = 'storage-location-badge';
 
-function clearCardStorageBadges() {
-	document.querySelectorAll(`.layout-cards .header .${CARD_STORAGE_BADGE_CLASS}`).forEach((el) => {
+function createStorageBadge(text: string): HTMLSpanElement {
+	const badge = document.createElement('span');
+	badge.className = STORAGE_BADGE_CLASS;
+	badge.textContent = text;
+	return badge;
+}
+
+function clearStorageBadges() {
+	document.querySelectorAll(`.layout-cards .header .${STORAGE_BADGE_CLASS}`).forEach((el) => {
 		el.remove();
+	});
+	document.querySelectorAll(`.layout-tabular .${STORAGE_BADGE_CLASS}`).forEach((el) => {
+		const parent = el.parentElement;
+		const text = el.textContent || '';
+		el.remove();
+		if (parent && !parent.querySelector(`.${STORAGE_BADGE_CLASS}`)) {
+			parent.append(text);
+		}
 	});
 }
 
-async function applyCardStorageBadges(items: Record<string, any>[] | undefined) {
-	clearCardStorageBadges();
+function applyTableStorageBadges() {
+	const headerRow = document.querySelector('.layout-tabular thead tr');
+	if (!headerRow) return;
 
-	if (!showStorageLocationLabels.value || layout.value !== 'cards' || !items?.length) {
+	const headers = Array.from(headerRow.children);
+	let storageIndex = headers.findIndex((th) => {
+		const classes = String((th as HTMLElement).className || '').split(/\s+/);
+		return classes.includes('storage') || th.getAttribute('data-field') === 'storage';
+	});
+	if (storageIndex < 0) {
+		storageIndex = headers.findIndex((th) => th.textContent?.trim().toLowerCase() === 'storage');
+	}
+	if (storageIndex < 0) return;
+
+	document.querySelectorAll('.layout-tabular tbody tr').forEach((row) => {
+		const cell = row.children[storageIndex] as HTMLElement | undefined;
+		if (!cell || cell.querySelector(`.${STORAGE_BADGE_CLASS}`)) return;
+		const text = String(cell.textContent || '').trim();
+		if (!text) return;
+		cell.textContent = '';
+		cell.appendChild(createStorageBadge(text));
+	});
+}
+
+async function applyStorageBadges(items: Record<string, any>[] | undefined) {
+	clearStorageBadges();
+
+	if (!showStorageLocationLabels.value) return;
+
+	await nextTick();
+
+	if (layout.value === 'tabular') {
+		applyTableStorageBadges();
 		return;
 	}
 
-	await nextTick();
+	if (layout.value !== 'cards' || !items?.length) return;
 
 	const cards = document.querySelectorAll('.layout-cards .grid .card:not(.folder-card)');
 	if (!cards.length) return;
@@ -452,15 +496,12 @@ async function applyCardStorageBadges(items: Record<string, any>[] | undefined) 
 		const header = cardEl.querySelector('.header');
 		if (!header) return;
 
-		const badge = document.createElement('span');
-		badge.className = CARD_STORAGE_BADGE_CLASS;
-		badge.textContent = storage;
-		header.appendChild(badge);
+		header.appendChild(createStorageBadge(storage));
 	});
 }
 
-function scheduleCardStorageBadges(items: Record<string, any>[] | undefined) {
-	void applyCardStorageBadges(items).catch(() => undefined);
+function scheduleStorageBadges(items: Record<string, any>[] | undefined) {
+	void applyStorageBadges(items).catch(() => undefined);
 }
 
 onBeforeRouteLeave((to, from) => {
@@ -469,7 +510,7 @@ onBeforeRouteLeave((to, from) => {
 		folderSelection.value = [];
 		confirmDelete.value = false;
 		confirmDeleteFolders.value = false;
-		clearCardStorageBadges();
+		clearStorageBadges();
 	}
 });
 
@@ -491,7 +532,7 @@ watch(
 		resetPage();
 		refreshFolderMigrateCount();
 		refreshFolderStorages();
-		clearCardStorageBadges();
+		clearStorageBadges();
 	},
 );
 
@@ -507,7 +548,7 @@ watch(
 	] as const,
 	() => {
 		if (layoutRef.value?.state?.loading) return;
-		scheduleCardStorageBadges(layoutRef.value?.state?.items);
+		scheduleStorageBadges(layoutRef.value?.state?.items);
 	},
 	{ deep: true, flush: 'post' },
 );
@@ -1035,20 +1076,6 @@ function bindLayout(layoutState: Record<string, any>) {
 			else router.push(path);
 		},
 	};
-
-	if (showStorageLocationLabels.value && layout.value === 'tabular' && Array.isArray(layoutState.tableHeaders)) {
-		bound.tableHeaders = layoutState.tableHeaders.map((header: Record<string, any>) => {
-			if (header.value !== 'storage') return header;
-			return {
-				...header,
-				field: {
-					...header.field,
-					display: 'storage-location-badge',
-					displayOptions: header.field?.displayOptions ?? {},
-				},
-			};
-		});
-	}
 
 	return bound;
 }
@@ -1596,15 +1623,10 @@ function bindLayout(layoutState: Record<string, any>) {
 </style>
 
 <style>
-/* Injected on standard Directus cards when a folder spans multiple storages. */
-.layout-cards .header .storage-location-badge {
-	position: absolute;
-	inset-block-end: 8px;
-	inset-inline-start: 8px;
-	z-index: 2;
+.storage-location-badge {
 	display: inline-flex;
 	align-items: center;
-	max-inline-size: calc(100% - 16px);
+	max-inline-size: 100%;
 	padding: 2px 8px;
 	overflow: hidden;
 	font-size: 11px;
@@ -1617,6 +1639,14 @@ function bindLayout(layoutState: Record<string, any>) {
 	background: var(--theme--primary);
 	border: none;
 	border-radius: var(--theme--border-radius);
+}
+
+.layout-cards .header .storage-location-badge {
+	position: absolute;
+	inset-block-end: 8px;
+	inset-inline-start: 8px;
+	z-index: 2;
+	max-inline-size: calc(100% - 16px);
 	box-shadow: 0 1px 3px rgb(38 50 56 / 0.2);
 }
 </style>

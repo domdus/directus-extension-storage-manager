@@ -62,11 +62,6 @@
 				"type": "hook",
 				"name": "storage-manager-hook",
 				"source": "src/hook/index.ts"
-			},
-			{
-				"type": "display",
-				"name": "storage-location-badge",
-				"source": "src/display/index.ts"
 			}
 		],
 		"host": ">=9.26.0 <13.0.0"
