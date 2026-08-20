@@ -2,7 +2,7 @@
 	"name": "directus-extension-storage-manager",
 	"description": "Browse, upload, detect, materialize, and move Directus files across storage adapters (local, S3, GCS, Azure, and more)",
 	"icon": "storage",
-	"version": "1.2.4",
+	"version": "1.2.5",
 	"license": "MIT",
 	"keywords": [
 		"directus",
