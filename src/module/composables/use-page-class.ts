@@ -34,9 +34,9 @@ export function usePageClass(): ComputedRef<string[]> {
 	const serverStore = useServerStore();
 
 	return computed(() => {
-		const classes = ['page'];
+		const classes = ['page-container'];
 		if (needsReducedTopPadding(serverStore?.info?.version)) {
-			classes.push('page--flush-top');
+			classes.push('page-container--flush-top');
 		}
 		return classes;
 	});

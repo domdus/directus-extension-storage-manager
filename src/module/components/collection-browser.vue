@@ -1568,13 +1568,7 @@ function bindLayout(layoutState: Record<string, any>) {
 	border: var(--theme--border-width) solid var(--theme--border-color-subdued);
 }
 
-.page {
-	padding: var(--content-padding);
-	padding-block-end: 0;
-	max-width: 1100px;
-}
-
-.page--flush-top {
+.page-container--flush-top {
 	padding-block-start: 0;
 }
 
