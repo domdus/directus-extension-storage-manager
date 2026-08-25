@@ -34,7 +34,8 @@ export function getFolderFilter(folder?: string | null): Filter {
  * (File Library parity: folders + files in the same view, not recursive).
  *
  * Note: Directus string filters do **not** support `_regex` (validation-only), so we use
- * `_ncontains` / `_starts_with` / `_nstarts_with` instead.
+ * `_ncontains` / `_starts_with` / `_nstarts_with` instead. Do not filter transform
+ * filenames with `_ncontains: '__'` — SQL LIKE treats `_` as a wildcard and excludes all rows.
  *
  * @param childFolderNames Immediate child folder names under `storagePath` (from browse).
  *        Used to exclude files that live under those subfolders when browsing a nested path.

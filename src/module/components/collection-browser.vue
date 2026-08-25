@@ -25,8 +25,11 @@ import type { StorageTarget } from './storage-target-picker.vue';
 import DeleteStorageFolderDialog from './delete-storage-folder-dialog.vue';
 import UploadFilesDialog from './upload-files-dialog.vue';
 import MaterializeDrawer from './materialize-drawer.vue';
+import ThumbnailsSidebarDetail from './thumbnails-sidebar-detail.vue';
+import TransformsPanel from './transforms-panel.vue';
 import { useDropUpload } from '../composables/use-drop-upload';
 import { useFilesBrowserPreset } from '../composables/use-files-browser-preset';
+import { useRootFileView } from '../composables/use-root-file-view';
 import { useFolders } from '../composables/use-folders';
 import { useStorageManager } from '../composables/use-storage-manager';
 import { useStorageFolderTrees } from '../composables/use-storage-folder-trees';
@@ -85,11 +88,37 @@ const folderStorages = ref<string[]>([]);
 
 const { layout, layoutOptions, layoutQuery, filter, search, resetPreset, resetPage } = useFilesBrowserPreset();
 const { layoutWrapper } = useLayout(layout);
+const { rootFileView, setRootFileView } = useRootFileView();
+const transformsPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
 
 const normalizedStoragePath = computed(() =>
 	String(props.storagePath || '')
 		.replace(/\\/g, '/')
 		.replace(/^\/+|\/+$/g, ''),
+);
+
+const isStorageRoot = computed(
+	() => props.mode === 'storage' && Boolean(props.storage) && !normalizedStoragePath.value,
+);
+
+const showThumbnailsSidebar = isStorageRoot;
+
+const showFilesGrid = computed(() => {
+	if (!isStorageRoot.value) return true;
+	return rootFileView.value === 'files';
+});
+
+const showTransformsSection = computed(() => {
+	if (!isStorageRoot.value) return false;
+	return rootFileView.value === 'transforms';
+});
+
+const transformsOnlyView = computed(() => isStorageRoot.value && rootFileView.value === 'transforms');
+
+const searchShowFilter = computed(() => !transformsOnlyView.value);
+
+const searchPlaceholder = computed(() =>
+	transformsOnlyView.value ? 'Search transforms…' : undefined,
 );
 
 const systemFilter = computed(() => {
@@ -101,6 +130,14 @@ const systemFilter = computed(() => {
 		);
 	}
 	return getFolderFilter(props.folder ?? null);
+});
+
+/** Avoid loading the files grid while viewing transforms only. */
+const layoutFilter = computed(() => {
+	if (transformsOnlyView.value) {
+		return { id: { _eq: '00000000-0000-0000-0000-000000000000' } };
+	}
+	return mergeFilters(filter.value, systemFilter.value);
 });
 
 const title = computed(() => {
@@ -533,8 +570,15 @@ watch(
 		refreshFolderMigrateCount();
 		refreshFolderStorages();
 		clearStorageBadges();
+		if (!isStorageRoot.value && rootFileView.value !== 'files') {
+			setRootFileView('files');
+		}
 	},
 );
+
+watch(rootFileView, () => {
+	resetPage();
+});
 
 watch(
 	() => [
@@ -1050,6 +1094,10 @@ function onSelectAllFolders() {
 	folderSelection.value = storageFolders.value.map((f) => f.path);
 }
 
+async function onTransformsDeleted() {
+	await transformsPanelRef.value?.refresh?.();
+}
+
 function bindLayout(layoutState: Record<string, any>) {
 	const pkField = layoutState.primaryKeyField?.field || 'id';
 	const hasFolders =
@@ -1095,7 +1143,7 @@ function bindLayout(layoutState: Record<string, any>) {
 		v-model:selection="selection"
 		v-model:layout-options="layoutOptions"
 		v-model:layout-query="effectiveLayoutQuery"
-		:filter="mergeFilters(filter, systemFilter)"
+		:filter="layoutFilter"
 		:filter-user="filter"
 		:filter-system="systemFilter"
 		:search="search"
@@ -1116,7 +1164,13 @@ function bindLayout(layoutState: Record<string, any>) {
 			</template>
 
 			<template #actions>
-				<search-input v-model="search" v-model:filter="filter" collection="directus_files" />
+				<search-input
+					v-model="search"
+					v-model:filter="filter"
+					collection="directus_files"
+					:show-filter="searchShowFilter"
+					:placeholder="searchPlaceholder"
+				/>
 
 				<add-storage-folder
 					v-if="mode === 'storage' && storage"
@@ -1294,6 +1348,7 @@ function bindLayout(layoutState: Record<string, any>) {
 			</v-notice>
 
 			<component
+				v-if="showFilesGrid"
 				:is="`layout-${layout}`"
 				v-bind="bindLayout(layoutState)"
 				v-model:extra-selection="folderSelection"
@@ -1352,6 +1407,14 @@ function bindLayout(layoutState: Record<string, any>) {
 				</template>
 			</component>
 
+			<transforms-panel
+				v-if="showTransformsSection && storage"
+				ref="transformsPanelRef"
+				:location="storage"
+				:search="search"
+				:compact="false"
+			/>
+
 			<drawer-item
 				v-if="activeFileId"
 				collection="directus_files"
@@ -1395,6 +1458,15 @@ function bindLayout(layoutState: Record<string, any>) {
 						</v-button>
 					</div>
 				</sidebar-detail>
+
+				<thumbnails-sidebar-detail
+					v-if="showThumbnailsSidebar && storage"
+					:model-value="rootFileView"
+					:location="storage"
+					:search="search"
+					@update:model-value="setRootFileView"
+					@deleted="onTransformsDeleted"
+				/>
 
 				<sidebar-detail
 					v-if="mode === 'storage' && storageInfo"

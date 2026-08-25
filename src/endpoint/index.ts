@@ -30,6 +30,7 @@ import { ensureSettingsField, getLocationSettings, invalidateSettingsCache, load
 import { isDirectusFolderMirrorEnabled } from '../hook/prefix';
 import { materializeDryRun, materializeRun } from './materialize';
 import { checkForUpdates } from './update-check';
+import { countRootTransforms, deleteAllRootTransforms, listRootTransforms } from './root-transforms';
 
 type EndpointContext = {
 	services: Record<string, any>;
@@ -355,6 +356,80 @@ export default {
 			}
 		});
 
+		/** Paginated root-level asset transforms (generated thumbnails). */
+		router.get('/storages/:location/root-transforms', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const location = String(req.params.location);
+				const locations = listConfiguredLocations(env);
+				if (!locations.includes(location)) {
+					res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+					return;
+				}
+				const search = typeof req.query.search === 'string' ? req.query.search : null;
+				const data = await listRootTransforms({
+					location,
+					env,
+					page: req.query.page,
+					limit: req.query.limit,
+					search,
+				});
+				res.json({ data: data.items, meta: { page: data.page, limit: data.limit, has_more: data.has_more } });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** Count root transforms (optionally capped) for delete confirmation. */
+		router.get(
+			'/storages/:location/root-transforms/count',
+			async (req: Request, res: Response, next: NextFunction) => {
+				try {
+					if (!requireAdmin(req, res)) return;
+					const location = String(req.params.location);
+					const locations = listConfiguredLocations(env);
+					if (!locations.includes(location)) {
+						res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+						return;
+					}
+					const search = typeof req.query.search === 'string' ? req.query.search : null;
+					const max = req.query.max != null ? Number(req.query.max) : undefined;
+					const data = await countRootTransforms({ location, env, search, max });
+					res.json({ data });
+				} catch (error) {
+					next(error);
+				}
+			},
+		);
+
+		/** Delete all root transforms not registered in directus_files. */
+		router.post(
+			'/storages/:location/root-transforms/delete-all',
+			async (req: Request, res: Response, next: NextFunction) => {
+				try {
+					if (!requireAdmin(req, res)) return;
+					const location = String(req.params.location);
+					const locations = listConfiguredLocations(env);
+					if (!locations.includes(location)) {
+						res.status(404).json({ errors: [{ message: `Unknown storage location: ${location}` }] });
+						return;
+					}
+					const body = (req.body || {}) as { dry_run?: boolean; search?: string | null };
+					const data = await deleteAllRootTransforms({
+						database,
+						location,
+						env,
+						search: body.search ?? null,
+						dryRun: Boolean(body.dry_run),
+						logger,
+					});
+					res.json({ data });
+				} catch (error) {
+					next(error);
+				}
+			},
+		);
+
 		/** Browse immediate storage folders under a path. */
 		router.get('/storages/:location/browse', async (req: Request, res: Response, next: NextFunction) => {
 			try {
@@ -373,7 +448,7 @@ export default {
 			}
 		});
 
-		/** Full nested folder tree for left-nav (parity with Directus Folders). */
+		/** Root-level physical folders for lazy nav (immediate children only). */
 		router.get('/storages/:location/folder-tree', async (req: Request, res: Response, next: NextFunction) => {
 			try {
 				if (!requireAdmin(req, res)) return;

@@ -21,6 +21,7 @@ import {
 	onFolderRenamedForClaims,
 } from './name-mirror-claims';
 import { captureNestedFilesForDelete, deleteNestedFileObjects } from './nested-file-delete';
+import { mirrorFileAfterUpload } from './upload-mirror';
 import { STORAGE_MANAGER_FIELD } from '../shared/types';
 
 export default defineHook(({ filter, action }, { database, env, services, getSchema, logger }) => {
@@ -38,6 +39,7 @@ export default defineHook(({ filter, action }, { database, env, services, getSch
 	});
 
 	// ── Prefix injection on file upload (Mirror Directus Folders) ──────────
+	// Runs when createOne filters are not skipped (e.g. JSON POST /files without binary).
 	filter('files.create', async (input: Record<string, any>) => {
 		try {
 			const envLocations = String(env['STORAGE_LOCATIONS'] ?? 'local')
@@ -62,6 +64,21 @@ export default defineHook(({ filter, action }, { database, env, services, getSch
 			logger.warn(`[storage-manager] Prefix injection failed: ${err?.message}`);
 		}
 		return input;
+	});
+
+	// Multipart uploads skip files.create filters (emitEvents: false). Mirror after upload.
+	action('files.upload', async (meta: { key?: string | number }) => {
+		if (meta.key == null) return;
+		try {
+			await mirrorFileAfterUpload({
+				database,
+				env,
+				fileId: String(meta.key),
+				logger,
+			});
+		} catch (err: any) {
+			logger.warn(`[storage-manager] Upload mirror failed: ${err?.message}`);
+		}
 	});
 
 	// ── Sticky name claims: first folder under parent+name keeps plain path ──

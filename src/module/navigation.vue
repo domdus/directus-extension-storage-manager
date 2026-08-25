@@ -17,7 +17,8 @@ const route = useRoute();
 const router = useRouter();
 const { nestedFolders, folders, loading, openFolders } = useFolders();
 const { storages, loadStorages } = useStorageManager();
-const { trees, openFolders: openStorageFolders } = useStorageFolderTrees();
+const { trees, openFolders: openStorageFolders, loadTree, loadFolderChildren, ensurePathLoaded, isTreeLoaded } =
+	useStorageFolderTrees();
 
 const currentFolder = computed(() => {
 	if (!route.path.startsWith('/storage-manager/folders')) return undefined;
@@ -46,7 +47,24 @@ const isOverview = computed(() => route.path === '/storage-manager' || route.pat
 const isSettings = computed(() => route.path.startsWith('/storage-manager/settings'));
 
 watch([currentFolder, loading, folders], setOpenFolders, { immediate: true });
-watch([currentStorage, currentStoragePath, trees], setOpenStorageFolders, { immediate: true, deep: true });
+watch([currentStorage, currentStoragePath], () => {
+	setOpenStorageFolders();
+	void syncStorageNavTree();
+}, { immediate: true });
+
+watch(openStorageFolders, (open, prev) => {
+	const added = open.filter((value) => !prev?.includes(value));
+	for (const value of added) {
+		if (value.startsWith('@')) {
+			const location = value.slice(1);
+			if (location) void loadTree(location);
+			continue;
+		}
+		const idx = value.indexOf(':');
+		if (idx === -1) continue;
+		void loadFolderChildren(value.slice(0, idx), value.slice(idx + 1));
+	}
+});
 
 onMounted(() => {
 	loadStorages().catch(() => undefined);
@@ -70,6 +88,12 @@ function goOverview() {
 
 function goSettings() {
 	router.push('/storage-manager/settings');
+}
+
+async function syncStorageNavTree() {
+	const location = currentStorage.value;
+	if (!location) return;
+	await ensurePathLoaded(location, currentStoragePath.value);
 }
 
 function setOpenFolders() {
@@ -151,6 +175,7 @@ function setOpenStorageFolders() {
 					:key="storage.location"
 					:storage="storage"
 					:folders="trees[storage.location] || []"
+					:tree-loaded="isTreeLoaded(storage.location)"
 					:current-location="currentStorage"
 					:current-path="currentStoragePath"
 					:click-handler="onStorageClick"

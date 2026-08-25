@@ -6,9 +6,11 @@ Move files between your Directus storages — local disk, S3, Google Cloud, Azur
 
 ## Overview
 
-<img alt="Storage Manager overview with local, local2, S3, and GCS adapters" src="https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_manager.png" width="800" />
+![Storage Manager overview with local, local2, S3, and GCS adapters](https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_manager.png)
 
 Directus can use several storages at once, but it will not move existing files for you. Storage Manager does: browse each storage, upload, find files that are on disk but not in Directus, and move files or whole folders.
+
+When you open a storage from the overview, the left sidebar shows that storage’s folder tree. Folders load as you expand them, so large storages stay quick to navigate.
 
 ### Your storages
 
@@ -29,6 +31,33 @@ Mirror does not rearrange files that are already stored. Use **Move to Storage F
 
 If two Directus folders share the same name, the second one gets a unique folder name on disk so they do not collide.
 
+When you upload through Storage Manager while browsing a specific storage, files go to that storage. Mirror then keeps new uploads in step with your Directus folders on that same storage.
+
+### File field interfaces
+
+Storage Manager adds three interfaces for file fields. Each one works like the built-in File, Files, or Image interface, but uploads go to the **storage adapter and folder you set on the field**.
+
+
+| Interface              | Use for                                         |
+| ---------------------- | ----------------------------------------------- |
+| **File with Storage**  | Single file (M2O)                               |
+| **Files with Storage** | Multiple files (M2M)                            |
+| **Image with Storage** | Single image (M2O), image MIME types by default |
+
+
+When you configure the field, set **Folder** and **Storage Location** (for example `local` or `s3`). Every upload from that field uses those settings. If **Mirror Directus Folders** is on for that storage, new files follow your Directus folder tree on disk.
+
+### Thumbnails
+
+At the **top level** of a storage (not inside a subfolder), a **Thumbnails** panel appears in the right sidebar.
+
+Directus often creates extra image files when it resizes or converts pictures for the website. Those files usually live at the storage root and do not show up as normal entries in the File Library. Storage Manager lets you work with them separately:
+
+- **Show Files** — your usual file list (the way you browse today)
+- **Show Transforms** — only those generated resize/preview files
+
+You can search by filename in transform view. To free up space, use **Delete All Transforms**. That removes the generated copies only — your original uploads stay safe. Directus will recreate those copies the next time an image is requested. A confirmation step tells you how many files would be removed before anything is deleted.
+
 ### Move to Storage Folder
 
 Pick files, folders, or everything on a storage, then choose where they should go.
@@ -39,7 +68,7 @@ Pick files, folders, or everything on a storage, then choose where they should g
 - Moving a whole storage keeps the folder structure
 - Empty folders can be included when you move a storage or selected folders
 
-<img alt="Move Files progress from local to S3" src="https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_move_to_gcs.png" width="800" />
+![Move Files progress from local to S3](https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_move_to_gcs.png)
 
 If the destination already has a **folder** with that name, files are merged into it. If another Directus file already uses that exact path, the incoming file is skipped and stays where it is. Image thumbnails move with the file when possible.
 
@@ -52,7 +81,7 @@ In **Directus Folders**, turn your Directus folder tree into real folders on sto
 
 Include subfolders if you want the whole tree. Dry Run shows counts before you run it. Directus Folders themselves are not changed.
 
-<img alt="Materialize Folder drawer with Keep and Merge storage modes" src="https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_materialize.png" width="800" />
+![Materialize Folder drawer with Keep and Merge storage modes](https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_materialize.png)
 
 ### Detect files
 
@@ -61,7 +90,7 @@ Find files that are on a storage but not yet in Directus.
 - At the storage root: **Detect Files on {storage}**
 - Inside a folder: **Detect Files in this Folder**
 
-Import adds them to Directus without moving the files. You can also delete leftover files that Directus does not know about (generated thumbnails are left alone).
+Import adds them to Directus without moving the files. You can also delete leftover files that Directus does not know about. Generated resize/preview files are left alone (use **Thumbnails → Delete All Transforms** at the storage root if you want to clear those).
 
 ### Settings
 
@@ -78,7 +107,9 @@ The **Storage Manager** Flow operation can move (or copy) files in automations. 
 3. Open **Storage Manager** from the left bar.
 4. On the overview, turn on **Mirror Directus Folders** for any storage that should follow your Directus folders.
 5. Browse a storage (or **Directus Folders**) and move or materialize as needed.
-6. Use **Dry Run**, then **Move**.
+6. At a storage root, open **Thumbnails** in the sidebar if you need to inspect or clear generated image copies.
+7. For collection fields that must land on a specific storage, use **File with Storage**, **Files with Storage**, or **Image with Storage** instead of the native file interfaces.
+8. Use **Dry Run**, then **Move**.
 
 ## Installation
 

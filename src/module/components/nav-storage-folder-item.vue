@@ -2,14 +2,16 @@
 /**
  * Recursive physical storage folder item for left-nav (mirrors nav-folder-item)
  * with File Library-style context menu (Rename / Move / Delete).
+ *
+ * Subfolders load on expand via useStorageFolderTrees (browse API per path).
  */
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import type { StorageFolderNode } from '../../shared/types';
 import StorageFolderContextMenu from './storage-folder-context-menu.vue';
 
 defineOptions({ name: 'NavStorageFolderItem' });
 
-defineProps<{
+const props = defineProps<{
 	location: string;
 	folder: StorageFolderNode;
 	currentLocation?: string | null;
@@ -31,6 +33,14 @@ function isActive(location: string, path: string, currentLocation?: string | nul
 	return currentLocation === location && (currentPath || '') === path;
 }
 
+/** Chevron until first expand; hide when loaded empty. */
+const isExpandable = computed(() => {
+	if (props.folder.childrenLoaded) {
+		return (props.folder.children?.length ?? 0) > 0;
+	}
+	return true;
+});
+
 function onContextMenu(event: MouseEvent) {
 	menu.value?.open(event);
 }
@@ -41,7 +51,7 @@ function onChanged() {
 </script>
 
 <template>
-	<template v-if="!folder.children || folder.children.length === 0">
+	<template v-if="!isExpandable">
 		<v-list-item
 			clickable
 			:active="isActive(location, folder.path, currentLocation, currentPath)"
@@ -77,8 +87,14 @@ function onChanged() {
 			</v-list-item-content>
 		</template>
 
+		<v-list-item v-if="folder.childrenLoaded && !folder.children?.length" disabled>
+			<v-list-item-content>
+				<span class="empty-children">Empty</span>
+			</v-list-item-content>
+		</v-list-item>
+
 		<nav-storage-folder-item
-			v-for="child in folder.children"
+			v-for="child in folder.children || []"
 			:key="child.path"
 			:location="location"
 			:folder="child"
@@ -97,3 +113,10 @@ function onChanged() {
 		@changed="onChanged"
 	/>
 </template>
+
+<style scoped>
+.empty-children {
+	font-size: 12px;
+	color: var(--theme--foreground-subdued);
+}
+</style>

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { diskDelete, diskExists, diskList, diskStat, getStorageManager } from './storage';
 import { getLocationDriver, getLocationRoot } from './usage';
 import { readImageDimensions, shouldReadImageDimensions } from './image-meta';
+import { isAssetTransform } from '../shared/transform-filename';
 
 export type OrphanFile = {
 	filename_disk: string;
@@ -13,19 +14,6 @@ export type OrphanFile = {
 	filename_download: string;
 	title: string;
 };
-
-/**
- * Directus generated image transforms / thumbnails.
- * AssetsService writes: `{stem}__${objectHash(transforms)}{ext}`
- * e.g. `965f1f65-…-43e7__f15aa4b815722867859d2a3fa46ab50834dfc8dc.avif`
- *
- * @see https://github.com/directus/directus/blob/v11.17.0/api/src/services/assets.ts (getAssetSuffix)
- */
-export const ASSET_TRANSFORM_FILENAME_RE = /__[a-f0-9]{16,}(?:\.[^.]+)?$/i;
-
-export function isAssetTransform(filename: string): boolean {
-	return ASSET_TRANSFORM_FILENAME_RE.test(path.basename(filename));
-}
 
 function isIgnoredDiskEntry(filename: string): boolean {
 	const base = path.basename(filename);

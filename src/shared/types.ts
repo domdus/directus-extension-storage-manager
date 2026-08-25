@@ -167,6 +167,8 @@ export type StorageFolderNode = {
 	name: string;
 	path: string;
 	children?: StorageFolderNode[];
+	/** Set after the first expand attempt (even when children is []). */
+	childrenLoaded?: boolean;
 };
 
 export const STORAGE_MANAGER_LOCATION_DEFAULTS: StorageLocationSettings = {
