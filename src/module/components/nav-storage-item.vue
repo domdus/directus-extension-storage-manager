@@ -40,11 +40,7 @@ function rootValue(location: string) {
 			</v-list-item-content>
 		</template>
 
-		<v-list-item v-if="!treeLoaded">
-			<v-skeleton-loader type="list-item-icon" />
-		</v-list-item>
-
-		<template v-else>
+		<template v-if="treeLoaded">
 			<nav-storage-folder-item
 				v-for="folder in folders"
 				:key="folder.path"

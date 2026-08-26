@@ -54,9 +54,9 @@ At the **top level** of a storage (not inside a subfolder), a **Thumbnails** pan
 Directus often creates extra image files when it resizes or converts pictures for the website. Those files usually live at the storage root and do not show up as normal entries in the File Library. Storage Manager lets you work with them separately:
 
 - **Show Files** — your usual file list (the way you browse today)
-- **Show Transforms** — only those generated resize/preview files
+- **Show Thumbnails** — only those generated resize/preview files, using the same cards/table layouts and pagination as the File Library
 
-You can search by filename in transform view. To free up space, use **Delete All Transforms**. That removes the generated copies only — your original uploads stay safe. Directus will recreate those copies the next time an image is requested. A confirmation step tells you how many files would be removed before anything is deleted.
+You can search by filename in the thumbnails view. To free up space, use **Delete All Transforms**. That removes the generated copies only — your original uploads stay safe. Directus will recreate those copies the next time an image is requested. A confirmation step tells you how many files would be removed before anything is deleted.
 
 ### Move to Storage Folder
 

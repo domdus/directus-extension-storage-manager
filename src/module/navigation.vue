@@ -160,12 +160,6 @@ function setOpenStorageFolders() {
 
 		<v-divider />
 
-		<template v-if="loading && (!nestedFolders || nestedFolders.length === 0)">
-			<v-list-item v-for="n in 4" :key="n">
-				<v-skeleton-loader type="list-item-icon" />
-			</v-list-item>
-		</template>
-
 		<div class="section-label">Storage adapters</div>
 
 		<div class="storages">
@@ -213,6 +207,12 @@ function setOpenStorageFolders() {
 						:current-folder="currentFolder"
 						:click-handler="onFolderClick"
 					/>
+
+					<v-list-item v-if="loading && (!nestedFolders || nestedFolders.length === 0)">
+						<v-list-item-content>
+							<span class="nav-loading">Loading…</span>
+						</v-list-item-content>
+					</v-list-item>
 				</v-list-group>
 			</v-item-group>
 		</div>
@@ -229,10 +229,6 @@ function setOpenStorageFolders() {
 </template>
 
 <style scoped>
-.v-skeleton-loader {
-	--v-skeleton-loader-background-color: var(--theme--background-accent);
-}
-
 .folders,
 .storages {
 	width: 100%;
@@ -252,6 +248,11 @@ function setOpenStorageFolders() {
 	font-weight: 700;
 	letter-spacing: 0.04em;
 	text-transform: uppercase;
+	color: var(--theme--foreground-subdued);
+}
+
+.nav-loading {
+	font-size: 12px;
 	color: var(--theme--foreground-subdued);
 }
 </style>

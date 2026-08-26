@@ -23,7 +23,7 @@ const view = computed({
 
 const viewOptions = [
 	{ value: 'files' as const, label: 'Show Files' },
-	{ value: 'transforms' as const, label: 'Show Transforms' },
+	{ value: 'transforms' as const, label: 'Show Thumbnails' },
 ];
 
 const filtered = computed(() => view.value !== 'files');
@@ -115,8 +115,10 @@ const confirmMessage = computed(() => {
 				/>
 			</div>
 
-			<div class="field full">
-				<v-button secondary full-width @click="openConfirm">Delete All Transforms</v-button>
+			<div class="field full delete-transforms">
+				<v-button secondary full-width class="sidebar-btn" @click="openConfirm">
+					Delete All Transforms
+				</v-button>
 			</div>
 		</div>
 
@@ -172,6 +174,26 @@ const confirmMessage = computed(() => {
 
 .fields :deep(.v-radio + .v-radio) {
 	margin-block-start: 0.4375rem;
+}
+
+/* Sidebar panel bg often matches --theme--background-normal, so default
+   secondary buttons look like plain text. Force a visible chip fill. */
+.delete-transforms :deep(.sidebar-btn) {
+	display: flex;
+	width: 100%;
+}
+
+.delete-transforms :deep(.sidebar-btn .button) {
+	width: 100%;
+	justify-content: center;
+	color: var(--theme--foreground);
+	background-color: var(--theme--background-accent);
+	border-color: var(--theme--background-accent);
+}
+
+.delete-transforms :deep(.sidebar-btn .button:hover:not(:disabled)) {
+	background-color: var(--theme--background-normal);
+	border-color: var(--theme--background-normal);
 }
 
 .dialog-info {

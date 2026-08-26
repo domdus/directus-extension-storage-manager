@@ -26,9 +26,9 @@ import DeleteStorageFolderDialog from './delete-storage-folder-dialog.vue';
 import UploadFilesDialog from './upload-files-dialog.vue';
 import MaterializeDrawer from './materialize-drawer.vue';
 import ThumbnailsSidebarDetail from './thumbnails-sidebar-detail.vue';
-import TransformsPanel from './transforms-panel.vue';
 import { useDropUpload } from '../composables/use-drop-upload';
 import { useFilesBrowserPreset } from '../composables/use-files-browser-preset';
+import { useRootTransformsLayout } from '../composables/use-root-transforms-layout';
 import { useRootFileView } from '../composables/use-root-file-view';
 import { useFolders } from '../composables/use-folders';
 import { useStorageManager } from '../composables/use-storage-manager';
@@ -89,7 +89,25 @@ const folderStorages = ref<string[]>([]);
 const { layout, layoutOptions, layoutQuery, filter, search, resetPreset, resetPage } = useFilesBrowserPreset();
 const { layoutWrapper } = useLayout(layout);
 const { rootFileView, setRootFileView } = useRootFileView();
-const transformsPanelRef = ref<{ refresh?: () => Promise<void> } | null>(null);
+
+const storageLocationRef = computed(() => props.storage);
+const {
+	transformsLayoutState,
+	refreshTransforms,
+	onLayoutWidth,
+	onLimitUpdate,
+	onFieldsUpdate,
+	onTableSpacingUpdate,
+	onSizeUpdate,
+	onSortUpdate,
+} = useRootTransformsLayout({
+	location: storageLocationRef,
+	search,
+	layout,
+	layoutOptions,
+	layoutQuery,
+	resetPreset,
+});
 
 const normalizedStoragePath = computed(() =>
 	String(props.storagePath || '')
@@ -622,7 +640,11 @@ watch(
 );
 
 async function refresh() {
-	await layoutRef.value?.state?.refresh?.();
+	if (showTransformsSection.value) {
+		await refreshTransforms();
+	} else {
+		await layoutRef.value?.state?.refresh?.();
+	}
 	await loadStorages(true).catch(() => undefined);
 	await loadStorageFolders();
 	await refreshFolderMigrateCount().catch(() => undefined);
@@ -1095,7 +1117,18 @@ function onSelectAllFolders() {
 }
 
 async function onTransformsDeleted() {
-	await transformsPanelRef.value?.refresh?.();
+	await refreshTransforms();
+}
+
+function bindTransformsLayout(layoutState: Record<string, any>) {
+	return {
+		...layoutState,
+		hasPrependContent: false,
+	};
+}
+
+function activeLayoutState(filesLayoutState: Record<string, any>) {
+	return showTransformsSection.value ? transformsLayoutState.value : filesLayoutState;
 }
 
 function bindLayout(layoutState: Record<string, any>) {
@@ -1160,7 +1193,7 @@ function bindLayout(layoutState: Record<string, any>) {
 			</template>
 
 			<template #actions:prepend>
-				<component :is="`layout-actions-${layout}`" v-bind="layoutState" />
+				<component :is="`layout-actions-${layout}`" v-bind="activeLayoutState(layoutState)" />
 			</template>
 
 			<template #actions>
@@ -1407,13 +1440,36 @@ function bindLayout(layoutState: Record<string, any>) {
 				</template>
 			</component>
 
-			<transforms-panel
+			<p v-if="showTransformsSection && storage" class="transforms-intro">
+				Generated thumbnails and resized variants at the storage root — not registered in Directus Files.
+			</p>
+
+			<component
 				v-if="showTransformsSection && storage"
-				ref="transformsPanelRef"
-				:location="storage"
-				:search="search"
-				:compact="false"
-			/>
+				:is="`layout-${layout}`"
+				v-bind="bindTransformsLayout(transformsLayoutState)"
+				@update:width="onLayoutWidth"
+				@update:limit="onLimitUpdate"
+				@update:fields="onFieldsUpdate"
+				@update:table-spacing="onTableSpacingUpdate"
+				@update:size="onSizeUpdate"
+				@update:sort="onSortUpdate"
+			>
+				<template #no-results>
+					<v-info title="No results" icon="search" center>
+						No transforms match your search.
+						<template #append>
+							<v-button @click="clearFilters">Clear search</v-button>
+						</template>
+					</v-info>
+				</template>
+
+				<template #no-items>
+					<v-info title="No thumbnails" icon="photo_size_select_large" center>
+						No generated transforms at the storage root.
+					</v-info>
+				</template>
+			</component>
 
 			<drawer-item
 				v-if="activeFileId"
@@ -1425,9 +1481,9 @@ function bindLayout(layoutState: Record<string, any>) {
 
 			<template #sidebar>
 				<layout-sidebar-detail v-model="layout">
-					<component :is="`layout-options-${layout}`" v-bind="layoutState" />
+					<component :is="`layout-options-${layout}`" v-bind="activeLayoutState(layoutState)" />
 				</layout-sidebar-detail>
-				<component :is="`layout-sidebar-${layout}`" v-bind="layoutState" />
+				<component :is="`layout-sidebar-${layout}`" v-bind="activeLayoutState(layoutState)" />
 
 				<sidebar-detail id="actions" icon="swap_horiz" title="Actions">
 					<div class="sidebar-actions">
@@ -1658,6 +1714,13 @@ function bindLayout(layoutState: Record<string, any>) {
 	margin: 0 0 24px;
 	line-height: 1.55;
 	color: var(--theme--foreground);
+}
+
+.transforms-intro {
+	margin: 0 var(--content-padding) 12px;
+	font-size: 13px;
+	line-height: 1.45;
+	color: var(--theme--foreground-subdued);
 }
 
 .move-hint {
