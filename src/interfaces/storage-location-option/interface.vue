@@ -30,10 +30,12 @@ onMounted(async () => {
 		const res = await api.get('/storage-manager/storages');
 		const rows = Array.isArray(res.data?.data) ? res.data.data : [];
 		const next = rows
-			.map((row: { location?: string; label?: string }) => {
+			.map((row: { location?: string; label?: string; short?: string; root?: string | null }) => {
 				const value = String(row?.location || '').trim();
 				if (!value) return null;
-				return { value, text: String(row?.label || value) };
+				const driver = String(row?.short || row?.label || '').trim();
+				const text = driver && driver.toLowerCase() !== value.toLowerCase() ? `${value} (${driver})` : value;
+				return { value, text };
 			})
 			.filter(Boolean) as StorageChoice[];
 
