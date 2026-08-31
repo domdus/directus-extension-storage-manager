@@ -35,6 +35,8 @@ export type UnreferencedScanMeta = {
 	total_files: number;
 	used_count: number;
 	unreferenced_count: number;
+	/** Sum of `filesize` for all unreferenced files (full count, not list-capped). */
+	unreferenced_bytes: number;
 	relation_targets: number;
 	text_targets: number;
 	/** Unique collections covered by relation and/or text targets. */
@@ -476,6 +478,7 @@ export async function scanUnreferencedFiles(
 				total_files: 0,
 				used_count: used.size,
 				unreferenced_count: 0,
+				unreferenced_bytes: 0,
 				relation_targets: relations.length,
 				text_targets: textTargets.length,
 				collections_checked: new Set([
@@ -511,24 +514,26 @@ export async function scanUnreferencedFiles(
 
 	const unreferencedIds: string[] = [];
 	let unreferencedCount = 0;
+	let unreferencedBytes = 0;
 	let idsTruncated = false;
 	let scanned = 0;
 	let after: string | null = null;
 
 	while (!isCancelled?.()) {
 		const chunkQuery = applyFileScopeFilters(
-			database('directus_files').select('id').orderBy('id', 'asc').limit(FILE_CHUNK),
+			database('directus_files').select('id', 'filesize').orderBy('id', 'asc').limit(FILE_CHUNK),
 			scope,
 		);
 		if (after) chunkQuery.where('id', '>', after);
 
-		const rows: Array<{ id: string }> = await chunkQuery;
+		const rows: Array<{ id: string; filesize: number | null }> = await chunkQuery;
 		if (!rows.length) break;
 
 		for (const row of rows) {
 			const id = String(row.id);
 			if (!used.has(normalizeUuid(id))) {
 				unreferencedCount++;
+				unreferencedBytes += Number(row.filesize) || 0;
 				if (unreferencedIds.length < MAX_IDS_RETURNED) unreferencedIds.push(id);
 				else idsTruncated = true;
 			}
@@ -592,6 +597,7 @@ export async function scanUnreferencedFiles(
 			total_files: totalFiles,
 			used_count: used.size,
 			unreferenced_count: unreferencedCount,
+			unreferenced_bytes: unreferencedBytes,
 			relation_targets: relations.length,
 			text_targets: textTargets.length,
 			collections_checked: collectionsChecked,

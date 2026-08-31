@@ -1,5 +1,6 @@
 import { useApi, useStores } from '@directus/extensions-sdk';
 import { computed, reactive, ref } from 'vue';
+import { formatBytes } from '../../shared/format';
 
 export type UnreferencedScanPayload = {
 	min_age_minutes: number;
@@ -13,6 +14,7 @@ export type UnreferencedScanMeta = {
 	total_files: number;
 	used_count: number;
 	unreferenced_count: number;
+	unreferenced_bytes?: number;
 	relation_targets: number;
 	text_targets: number;
 	collections_checked: number;
@@ -324,9 +326,11 @@ export function useUnreferencedScanJob() {
 			result.value = meta;
 
 			if (backgrounded.value) {
+				const sizeHint =
+					meta.unreferenced_bytes != null ? ` · ${formatBytes(meta.unreferenced_bytes)}` : '';
 				finishToast(
 					'success',
-					`Scan complete · ${meta.unreferenced_count.toLocaleString()} unreferenced`,
+					`Scan complete · ${meta.unreferenced_count.toLocaleString()} unreferenced${sizeHint}`,
 					`${meta.total_files.toLocaleString()} files checked`,
 				);
 			}

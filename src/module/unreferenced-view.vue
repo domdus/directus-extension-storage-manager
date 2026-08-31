@@ -290,6 +290,18 @@
 						</span>
 					</div>
 					<div class="stat">
+						<span class="stat-value">{{ formatBytes(meta.unreferenced_bytes ?? 0) }}</span>
+						<span class="stat-label">
+							Total Size
+							<v-icon
+								v-tooltip.top="'Sum of File Library filesize for all unreferenced files found by this scan (full total, not just the listed batch).'"
+								name="help_outline"
+								small
+								class="stat-info"
+							/>
+						</span>
+					</div>
+					<div class="stat">
 						<span class="stat-value">{{ (meta.collections_checked ?? 0).toLocaleString() }}</span>
 						<span class="stat-label">
 							Collections Checked
@@ -382,8 +394,20 @@
 				<v-card>
 					<v-card-title>Delete {{ selection.length }} file(s)?</v-card-title>
 					<v-card-text>
-						Each file is re-checked for references before delete. Still-referenced files are skipped.
-						This cannot be undone.
+						<p>
+							About to remove
+							<strong>{{ selection.length.toLocaleString() }}</strong>
+							file{{ selection.length === 1 ? '' : 's' }}
+							<template v-if="deleteSizeLoading"> · measuring size…</template>
+							<template v-else-if="deleteSelectionBytes != null">
+								· <strong>{{ formatBytes(deleteSelectionBytes) }}</strong>
+							</template>
+							from the File Library.
+						</p>
+						<p>
+							Each file is re-checked for references before delete. Still-referenced files are skipped.
+							This cannot be undone.
+						</p>
 					</v-card-text>
 					<v-card-actions>
 						<v-button secondary @click="confirmOpen = false">Cancel</v-button>
@@ -460,6 +484,8 @@ const deleting = ref(false);
 const scannedOnce = ref(false);
 const error = ref('');
 const confirmOpen = ref(false);
+const deleteSelectionBytes = ref<number | null>(null);
+const deleteSizeLoading = ref(false);
 const meta = ref<ScanMeta | null>(null);
 const unreferencedIds = ref<string[]>([]);
 
@@ -735,9 +761,37 @@ watch(scanJobResult, async (next) => {
 	}
 });
 
-function askDelete() {
+async function sumSelectionFilesize(ids: string[]): Promise<number> {
+	const CHUNK = 500;
+	let total = 0;
+	for (let i = 0; i < ids.length; i += CHUNK) {
+		const chunk = ids.slice(i, i + CHUNK);
+		const res = await api.get('/files', {
+			params: {
+				limit: chunk.length,
+				fields: ['id', 'filesize'],
+				filter: JSON.stringify({ id: { _in: chunk } }),
+			},
+		});
+		for (const row of (res.data?.data || []) as Array<{ filesize?: number | null }>) {
+			total += Number(row.filesize) || 0;
+		}
+	}
+	return total;
+}
+
+async function askDelete() {
 	if (!selection.value.length) return;
 	confirmOpen.value = true;
+	deleteSelectionBytes.value = null;
+	deleteSizeLoading.value = true;
+	try {
+		deleteSelectionBytes.value = await sumSelectionFilesize(selection.value.map(String));
+	} catch {
+		deleteSelectionBytes.value = null;
+	} finally {
+		deleteSizeLoading.value = false;
+	}
 }
 
 async function doDelete() {

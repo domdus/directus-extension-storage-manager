@@ -68,6 +68,9 @@
 				<v-notice type="success" icon="check_circle">
 					Scan complete —
 					<strong>{{ localResult.unreferenced_count.toLocaleString() }}</strong> unreferenced
+					<span v-if="localResult.unreferenced_bytes != null">
+						· {{ formatBytes(localResult.unreferenced_bytes) }}
+					</span>
 					of {{ localResult.total_files.toLocaleString() }} files
 					({{ formatDuration(localResult.elapsed_ms) }}).
 				</v-notice>
@@ -89,7 +92,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { formatDuration } from '../../shared/format';
+import { formatBytes, formatDuration } from '../../shared/format';
 import {
 	useUnreferencedScanJob,
 	type UnreferencedScanMeta,
