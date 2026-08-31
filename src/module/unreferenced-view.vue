@@ -239,15 +239,15 @@
 
 						<div class="scan-bar-field scan-bar-field--check">
 							<label class="scan-bar-label-row">
-								<span>Scan WYSIWYG / JSON Fields</span>
+								<span>Scan Text Fields</span>
 								<v-icon
-									v-tooltip.top="'Optional: also searches rich text, Markdown, JSON, and code for /assets/ links and file UUIDs. Adds significant extra scan time on large content tables — turn off for a faster relations-only pass.'"
+									v-tooltip.top="'Optional: also searches rich text, Markdown, JSON, code, multiline, list, tags, and text columns for /assets/ links and file UUIDs. Adds significant extra scan time on large content tables — turn off for a faster relations-only pass.'"
 									name="help_outline"
 									small
 									class="scan-bar-info"
 								/>
 							</label>
-							<div class="scan-bar-radios" role="radiogroup" aria-label="Scan WYSIWYG / JSON Fields">
+							<div class="scan-bar-radios" role="radiogroup" aria-label="Scan Text Fields">
 								<v-radio
 									:model-value="lifecycle.scan_text_fields"
 									:value="true"
@@ -280,7 +280,9 @@
 						<span class="stat-label">
 							Unreferenced
 							<v-icon
-								v-tooltip.top="'File Library entries with no remaining references in relations or (optional) text fields, after Min Age / Storage Filter.'"
+								v-tooltip.top="meta?.ids_truncated
+									? 'Total unreferenced files found. The list below may show fewer — only listed files can be moved or deleted; scan again after clearing a batch.'
+									: 'File Library entries with no remaining references in relations or (optional) text fields, after Min Age / Storage Filter.'"
 								name="help_outline"
 								small
 								class="stat-info"
@@ -316,7 +318,7 @@
 						<span class="stat-label">
 							Text Fields Scanned
 							<v-icon
-								v-tooltip.top="'WYSIWYG, Markdown, JSON, code, and similar content fields checked for /assets/ links or file UUIDs. System Directus tables are excluded.'"
+								v-tooltip.top="'Rich text, Markdown, JSON, code, multiline, list, tags, and text columns checked for /assets/ links or file UUIDs. System Directus tables are excluded.'"
 								name="help_outline"
 								small
 								class="stat-info"
@@ -330,7 +332,10 @@
 				</div>
 
 				<p v-if="meta?.ids_truncated" class="notice">
-					Result list is capped for the browser filter; the Unreferenced count includes everything found.
+					Showing {{ listedUnreferencedCount.toLocaleString() }} of
+					{{ meta.unreferenced_count.toLocaleString() }} unreferenced files. Only the files listed below can
+					be selected to move or delete — finish this batch, then scan again for the rest. Tip: use
+					<strong>Storage Filter</strong> to work through one storage at a time.
 				</p>
 
 				<p v-if="error" class="error">{{ error }}</p>
@@ -486,6 +491,8 @@ const busy = computed(
 		movingFolder.value ||
 		movingStorage.value,
 );
+
+const listedUnreferencedCount = computed(() => unreferencedIds.value.length);
 
 const moveDestinationHint = computed(() => {
 	const loc = selectedMoveTarget.value.location;

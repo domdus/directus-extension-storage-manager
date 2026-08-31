@@ -224,19 +224,15 @@ export function discoverTextScanTargets(fieldRows: FieldMetaRow[], relationKeys:
 			field,
 			mode: byType && (type === 'json' || type === 'csv' || iface === 'input-code' || iface === 'json' || iface === 'list')
 				? 'assets_and_uuids'
-				: byInterface && (iface.includes('rich-text') || iface === 'wysiwyg' || iface === 'markdown' || iface === 'input-rich-text-md')
+				: byInterface &&
+					  (iface.includes('rich-text') ||
+							iface === 'wysiwyg' ||
+							iface === 'markdown' ||
+							iface === 'input-rich-text-md' ||
+							iface === 'input-block-editor')
 					? 'assets_only'
 					: 'assets_and_uuids',
 		});
-	}
-
-	// Rich text: assets_only reduces noise; json/code: bare UUIDs too.
-	for (const t of out) {
-		const row = fieldRows.find((r) => r.collection === t.collection && r.field === t.field);
-		const iface = (row?.interface || '').toLowerCase();
-		if (iface.includes('rich-text') || iface === 'wysiwyg' || iface === 'markdown' || iface === 'input-block-editor') {
-			t.mode = 'assets_only';
-		}
 	}
 
 	return out.sort((a, b) => a.collection.localeCompare(b.collection) || a.field.localeCompare(b.field));

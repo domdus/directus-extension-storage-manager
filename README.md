@@ -102,7 +102,7 @@ Set your scan options, then click **Scan**:
 
 - **Min Age** — skip files that were uploaded very recently (so mid-upload or draft files are not flagged yet)
 - **Storage Filter** — limit the search to one storage, or check all
-- **Scan WYSIWYG / JSON Fields** — also look inside rich text and similar content for file links. This can take longer on large sites; turn it off for a faster check of file/image fields only
+- **Scan Text Fields** — also look inside rich text, Markdown, JSON, code, multiline, list, tags, and text columns for file links. This can take longer on large sites; turn it off for a faster check of file/image fields only
 
 After a scan you get a short summary and a list of matches (same cards/table layouts as elsewhere in Storage Manager). Select files and choose what to do:
 

@@ -8,7 +8,7 @@ export type StorageManagerLifecycleSettings = {
 	on_item_delete: FileLifecycleItemDeleteAction;
 	/** Skip files newer than this (minutes) in Find Unreferenced. */
 	scan_min_age_minutes: number;
-	/** Scan WYSIWYG / Markdown / JSON / code fields for UUIDs and /assets/ links. */
+	/** Scan rich text / Markdown / JSON / code / text fields for UUIDs and /assets/ links. */
 	scan_text_fields: boolean;
 };
 
