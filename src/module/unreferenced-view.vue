@@ -336,9 +336,9 @@
 				<p v-if="error" class="error">{{ error }}</p>
 			</div>
 
-			<div v-if="scanning" class="loading-block">
+			<div v-if="scanning && !scanDrawerOpen" class="loading-block">
 				<v-progress-circular indeterminate />
-				<span>{{ scanProgress || 'Scanning relations and text fields…' }}</span>
+				<span>Scan running in the background…</span>
 			</div>
 
 			<component
@@ -398,6 +398,8 @@
 				:estimated-count="selection.length || undefined"
 				@done="onMigrated"
 			/>
+
+			<unreferenced-scan-drawer v-model="scanDrawerOpen" @done="onScanDone" />
 		</private-view>
 	</component>
 </template>
@@ -415,8 +417,11 @@ import DirectusFolderPicker from './components/directus-folder-picker.vue';
 import StorageTargetPicker from './components/storage-target-picker.vue';
 import type { StorageTarget } from './components/storage-target-picker.vue';
 import MigrateDrawer from './components/migrate-drawer.vue';
+import UnreferencedScanDrawer from './components/unreferenced-scan-drawer.vue';
 import { useFilesBrowserPreset } from './composables/use-files-browser-preset';
 import { useMigrateJob } from './composables/use-migrate-job';
+import { useUnreferencedScanJob } from './composables/use-unreferenced-scan-job';
+import type { UnreferencedScanMeta } from './composables/use-unreferenced-scan-job';
 import { usePageClass } from './composables/use-page-class';
 import { useStorageLocationBadges } from './composables/use-storage-location-badges';
 import { useStorageManager } from './composables/use-storage-manager';
@@ -424,20 +429,7 @@ import { mergeFilters } from './utils/filters';
 import { formatBytes } from '../shared/format';
 import { LIFECYCLE_DEFAULTS } from '../shared/lifecycle';
 
-type ScanMeta = {
-	total_files: number;
-	used_count: number;
-	unreferenced_count: number;
-	relation_targets: number;
-	text_targets: number;
-	collections_checked: number;
-	min_age_minutes: number;
-	scan_text_fields: boolean;
-	elapsed_ms: number;
-	truncated: boolean;
-	ids_truncated?: boolean;
-	ids?: string[];
-};
+type ScanMeta = UnreferencedScanMeta;
 
 /** Sentinel UUID so the layout filter matches nothing before the first scan. */
 const EMPTY_ID = '00000000-0000-4000-8000-000000000000';
@@ -448,11 +440,17 @@ const router = useRouter();
 const pageClass = usePageClass();
 const { storages, loadStorages } = useStorageManager();
 const { start: startMigrate } = useMigrateJob();
+const {
+	running: scanning,
+	result: scanJobResult,
+	reopenNonce: scanReopenNonce,
+	start: startScanJob,
+	clearLastResult: clearScanJobResult,
+} = useUnreferencedScanJob();
 
 const layoutRef = ref();
 const selection = ref<string[]>([]);
-const scanning = ref(false);
-const scanProgress = ref('');
+const scanDrawerOpen = ref(false);
 const deleting = ref(false);
 const scannedOnce = ref(false);
 const error = ref('');
@@ -680,140 +678,55 @@ async function persistScanOptions() {
 	});
 }
 
+async function applyScanMeta(next: ScanMeta) {
+	meta.value = next;
+	const ids = Array.isArray(next.ids) ? next.ids.map(String) : [];
+	unreferencedIds.value = ids;
+	scannedOnce.value = true;
+	error.value = '';
+	resetPage();
+	await refreshLayout();
+}
+
+async function onScanDone(next: ScanMeta) {
+	await applyScanMeta(next);
+	clearScanJobResult();
+}
+
 async function runScan() {
-	if (scanning.value) return;
-	scanning.value = true;
-	scanProgress.value = 'Starting scan…';
+	if (scanning.value) {
+		scanDrawerOpen.value = true;
+		return;
+	}
 	error.value = '';
 	selection.value = [];
 	try {
 		await persistScanOptions().catch(() => undefined);
-		meta.value = await streamUnreferencedScan({
+		scanDrawerOpen.value = true;
+		await startScanJob({
 			min_age_minutes: Number(lifecycle.scan_min_age_minutes) || 0,
 			scan_text_fields: Boolean(lifecycle.scan_text_fields),
 			storage: storageFilter.value?.trim() || null,
 			limit: 1,
 			offset: 0,
-			onProgress: (message) => {
-				scanProgress.value = message;
-			},
 		});
-		const ids = Array.isArray(meta.value?.ids) ? meta.value!.ids!.map(String) : [];
-		unreferencedIds.value = ids;
-		scannedOnce.value = true;
-		resetPage();
-		await refreshLayout();
 	} catch (err: any) {
 		error.value = err?.message || 'Scan failed';
-		meta.value = null;
-		unreferencedIds.value = [];
-	} finally {
-		scanning.value = false;
-		scanProgress.value = '';
 	}
 }
 
-function getAuthHeaders(): Record<string, string> {
-	const headers: Record<string, string> = {
-		'Content-Type': 'application/json',
-		Accept: 'text/event-stream',
-	};
-	const defaults = (api as any)?.defaults?.headers;
-	const auth =
-		defaults?.common?.Authorization ||
-		defaults?.Authorization ||
-		defaults?.common?.authorization ||
-		defaults?.authorization;
-	if (typeof auth === 'string' && auth) headers.Authorization = auth;
-	return headers;
-}
+watch(scanReopenNonce, () => {
+	scanDrawerOpen.value = true;
+});
 
-function resolveScanStreamUrl(): string {
-	const base = String((api as any)?.defaults?.baseURL || '').replace(/\/$/, '');
-	const path = '/storage-manager/unreferenced/scan/stream';
-	return base ? `${base}${path}` : path;
-}
-
-async function streamUnreferencedScan(opts: {
-	min_age_minutes: number;
-	scan_text_fields: boolean;
-	storage: string | null;
-	limit: number;
-	offset: number;
-	onProgress: (message: string) => void;
-}): Promise<ScanMeta> {
-	const response = await fetch(resolveScanStreamUrl(), {
-		method: 'POST',
-		headers: getAuthHeaders(),
-		body: JSON.stringify({
-			min_age_minutes: opts.min_age_minutes,
-			scan_text_fields: opts.scan_text_fields,
-			storage: opts.storage,
-			limit: opts.limit,
-			offset: opts.offset,
-		}),
-		credentials: 'same-origin',
-	});
-
-	if (!response.ok) {
-		let message = `Scan failed (${response.status})`;
-		try {
-			const json = await response.json();
-			message = json?.errors?.[0]?.message || message;
-		} catch {
-			// ignore
-		}
-		throw new Error(message);
+watch(scanJobResult, async (next) => {
+	if (!next || scanning.value) return;
+	// Apply background-completed results when returning to this page.
+	if (!scanDrawerOpen.value) {
+		await applyScanMeta(next);
+		clearScanJobResult();
 	}
-	if (!response.body) throw new Error('No response body for scan stream');
-
-	const reader = response.body.getReader();
-	const decoder = new TextDecoder();
-	let buffer = '';
-	let finalMeta: ScanMeta | null = null;
-
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		buffer += decoder.decode(value, { stream: true });
-		const chunks = buffer.split('\n\n');
-		buffer = chunks.pop() || '';
-
-		for (const chunk of chunks) {
-			for (const line of chunk.split('\n')) {
-				const trimmed = line.trim();
-				if (!trimmed.startsWith('data:')) continue;
-				const payload = trimmed.slice(5).trim();
-				if (!payload) continue;
-				let event: Record<string, any>;
-				try {
-					event = JSON.parse(payload);
-				} catch {
-					continue;
-				}
-
-				if (event.type === 'heartbeat') continue;
-				if (event.type === 'start' && event.message) {
-					opts.onProgress(String(event.message));
-					continue;
-				}
-				if (event.type === 'progress') {
-					opts.onProgress(String(event.message || 'Scanning…'));
-					continue;
-				}
-				if (event.type === 'error') {
-					throw new Error(event.message || 'Scan failed');
-				}
-				if (event.type === 'done') {
-					finalMeta = event.meta as ScanMeta;
-				}
-			}
-		}
-	}
-
-	if (!finalMeta) throw new Error('Scan stream ended without a result');
-	return finalMeta;
-}
+});
 
 function askDelete() {
 	if (!selection.value.length) return;
