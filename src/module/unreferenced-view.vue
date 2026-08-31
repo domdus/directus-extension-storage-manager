@@ -337,10 +337,6 @@
 							/>
 						</span>
 					</div>
-					<div class="stat">
-						<span class="stat-value">{{ formatMs(meta.elapsed_ms) }}</span>
-						<span class="stat-label">Duration</span>
-					</div>
 				</div>
 
 				<p v-if="meta?.ids_truncated" class="notice">
@@ -582,11 +578,6 @@ useStorageLocationBadges({
 	layoutRef,
 	layoutQuery,
 });
-
-function formatMs(ms: number) {
-	if (ms < 1000) return `${ms} ms`;
-	return `${(ms / 1000).toFixed(1)} s`;
-}
 
 const systemFilter = computed(() => {
 	const ids = unreferencedIds.value.length ? unreferencedIds.value : [EMPTY_ID];
