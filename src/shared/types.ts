@@ -145,6 +145,8 @@ export type StorageManagerSettings = {
 	 * Absent (`undefined`) means claims have never been initialized (legacy bootstrap once).
 	 */
 	name_mirror_claims?: Record<string, string>;
+	/** File lifecycle defaults (unreferenced scan + deselect / item-delete policies). */
+	lifecycle?: import('./lifecycle').StorageManagerLifecycleSettings;
 };
 
 export const STORAGE_MANAGER_FIELD = 'storage_manager';

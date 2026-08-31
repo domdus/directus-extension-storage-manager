@@ -31,6 +31,8 @@ import { isDirectusFolderMirrorEnabled } from '../hook/prefix';
 import { materializeDryRun, materializeRun } from './materialize';
 import { checkForUpdates } from './update-check';
 import { countRootTransforms, deleteAllRootTransforms, listRootTransforms } from './root-transforms';
+import { registerUnreferencedRoutes } from './unreferenced-routes';
+import { LIFECYCLE_DEFAULTS, normalizeLifecycleSettings } from '../shared/lifecycle';
 
 type EndpointContext = {
 	services: Record<string, any>;
@@ -303,6 +305,8 @@ export default {
 				next(error);
 			}
 		});
+
+		registerUnreferencedRoutes(router, context);
 
 		router.get('/storages', async (req: Request, res: Response, next: NextFunction) => {
 			try {
@@ -1543,7 +1547,12 @@ export default {
 			try {
 				if (!requireAdmin(req, res)) return;
 				const settings = await loadSettings(database);
-				res.json({ data: { locations: settings.locations ?? {} } });
+				res.json({
+					data: {
+						locations: settings.locations ?? {},
+						lifecycle: normalizeLifecycleSettings(settings.lifecycle ?? LIFECYCLE_DEFAULTS),
+					},
+				});
 			} catch (error) {
 				next(error);
 			}
@@ -1553,9 +1562,14 @@ export default {
 		router.patch('/settings', async (req: Request, res: Response, next: NextFunction) => {
 			try {
 				if (!requireAdmin(req, res)) return;
-				const body = req.body as { locations?: Record<string, Partial<StorageLocationSettings>> };
-				if (!body || typeof body.locations !== 'object') {
-					res.status(400).json({ errors: [{ message: 'Body must contain a "locations" object.' }] });
+				const body = req.body as {
+					locations?: Record<string, Partial<StorageLocationSettings>>;
+					lifecycle?: Record<string, unknown>;
+				};
+				if (!body || (typeof body.locations !== 'object' && body.lifecycle === undefined)) {
+					res.status(400).json({
+						errors: [{ message: 'Body must contain a "locations" object and/or "lifecycle".' }],
+					});
 					return;
 				}
 
@@ -1567,12 +1581,14 @@ export default {
 
 				// Merge: for each incoming location, deep-merge defaults → existing → incoming
 				const merged: Record<string, StorageLocationSettings> = { ...(existing.locations ?? {}) };
-				for (const [loc, partial] of Object.entries(body.locations)) {
-					merged[loc] = {
-						...STORAGE_MANAGER_LOCATION_DEFAULTS,
-						...(existing.locations?.[loc] ?? {}),
-						...partial,
-					};
+				if (body.locations && typeof body.locations === 'object') {
+					for (const [loc, partial] of Object.entries(body.locations)) {
+						merged[loc] = {
+							...STORAGE_MANAGER_LOCATION_DEFAULTS,
+							...(existing.locations?.[loc] ?? {}),
+							...partial,
+						};
+					}
 				}
 
 				const next_settings: StorageManagerSettings = {
@@ -1580,11 +1596,21 @@ export default {
 					...(existing.name_mirror_claims !== undefined
 						? { name_mirror_claims: existing.name_mirror_claims }
 						: {}),
+					lifecycle: normalizeLifecycleSettings(
+						body.lifecycle !== undefined
+							? { ...normalizeLifecycleSettings(existing.lifecycle ?? LIFECYCLE_DEFAULTS), ...body.lifecycle }
+							: existing.lifecycle ?? LIFECYCLE_DEFAULTS,
+					),
 				};
 				await database('directus_settings').update({ [STORAGE_MANAGER_FIELD]: JSON.stringify(next_settings) });
 				invalidateSettingsCache();
 
-				res.json({ data: { locations: next_settings.locations } });
+				res.json({
+					data: {
+						locations: next_settings.locations,
+						lifecycle: next_settings.lifecycle,
+					},
+				});
 			} catch (error) {
 				next(error);
 			}

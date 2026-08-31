@@ -5,6 +5,7 @@ import { clamp, get, isEmpty, isNil, set } from 'lodash-es';
 import { render } from 'micromustache';
 import { computed, inject, ref, toRef, toRefs } from 'vue';
 import Draggable from 'vuedraggable';
+import { useApi } from '@directus/extensions-sdk';
 import { useMimeTypeFilter } from '../shared/composables/use-mime-type-filter';
 import { useRelationM2M } from '../shared/composables/use-relation-m2m';
 import {
@@ -15,6 +16,7 @@ import {
 import { useRelationPermissionsM2M } from '../shared/composables/use-relation-permissions';
 import { getAssetUrl } from '../shared/utils/get-asset-url';
 import { parseFilter } from '../shared/utils/parse-filter';
+import { unexpectedError } from '../shared/utils/unexpected-error';
 import { useUploadPreset } from '../shared/utils/upload-preset';
 
 const props = withDefaults(
@@ -34,6 +36,8 @@ const props = withDefaults(
 		filter?: Filter;
 		limit?: number;
 		allowedMimeTypes?: string[];
+		onDeselect?: string;
+		onItemDelete?: string;
 	}>(),
 	{
 		nonEditable: false,
@@ -42,6 +46,8 @@ const props = withDefaults(
 		enableSelect: true,
 		storage: 'local',
 		limit: 15,
+		onDeselect: 'keep',
+		onItemDelete: 'keep',
 	},
 );
 
@@ -49,6 +55,7 @@ const emit = defineEmits<{
 	input: [value: (number | string | Record<string, any>)[] | Record<string, any> | null];
 }>();
 
+const api = useApi();
 const { collection, field, primaryKey, limit, version } = toRefs(props);
 const { relationInfo } = useRelationM2M(collection, field);
 const uploadPreset = useUploadPreset(toRef(props, 'storage'));
@@ -185,6 +192,34 @@ function stageEdits(item: Record<string, any>) {
 }
 
 function deleteItem(item: DisplayItem) {
+	void onRemoveFile(item);
+}
+
+function fileIdFromDisplayItem(item: DisplayItem): string | null {
+	if (!relationInfo.value) return null;
+	const junctionField = relationInfo.value.junctionField.field;
+	const relationPkField = relationInfo.value.relatedPrimaryKeyField.field;
+	const nested = get(item, [junctionField]);
+	if (nested && typeof nested === 'object' && nested[relationPkField] != null) {
+		return String(nested[relationPkField]);
+	}
+	if (typeof nested === 'string' || typeof nested === 'number') return String(nested);
+	return null;
+}
+
+const deselectDialog = ref(false);
+const deselectDeleting = ref(false);
+const pendingRemoveItem = ref<DisplayItem | null>(null);
+
+async function deleteFileIfUnreferenced(fileId: string) {
+	try {
+		await api.post('/storage-manager/files/delete-if-unreferenced', { file_ids: [fileId] });
+	} catch (error) {
+		unexpectedError(error);
+	}
+}
+
+function applyRemove(item: DisplayItem) {
 	if (
 		page.value === Math.ceil(totalItemCount.value / limit.value) &&
 		page.value !== Math.ceil((totalItemCount.value - 1) / limit.value)
@@ -192,6 +227,43 @@ function deleteItem(item: DisplayItem) {
 		page.value = Math.max(1, page.value - 1);
 	}
 	remove(item);
+}
+
+async function onRemoveFile(item: DisplayItem) {
+	const policy = props.onDeselect || 'keep';
+	const fileId = fileIdFromDisplayItem(item);
+
+	if (policy === 'ask' && fileId) {
+		pendingRemoveItem.value = item;
+		deselectDialog.value = true;
+		return;
+	}
+
+	applyRemove(item);
+	if (policy === 'delete_if_unreferenced' && fileId) {
+		await deleteFileIfUnreferenced(fileId);
+	}
+}
+
+function confirmDeselectOnly() {
+	const item = pendingRemoveItem.value;
+	deselectDialog.value = false;
+	pendingRemoveItem.value = null;
+	if (item) applyRemove(item);
+}
+
+async function confirmDeselectAndDelete() {
+	const item = pendingRemoveItem.value;
+	const fileId = item ? fileIdFromDisplayItem(item) : null;
+	deselectDeleting.value = true;
+	try {
+		if (item) applyRemove(item);
+		if (fileId) await deleteFileIfUnreferenced(fileId);
+	} finally {
+		deselectDeleting.value = false;
+		deselectDialog.value = false;
+		pendingRemoveItem.value = null;
+	}
 }
 
 function onUpload(files: Record<string, any>[] | null) {
@@ -435,6 +507,23 @@ const menuActive = computed(() => editModalActive.value || selectModalActive.val
 				</v-card-text>
 				<v-card-actions>
 					<v-button @click="showUpload = false">{{ $t('done') }}</v-button>
+				</v-card-actions>
+			</v-card>
+		</v-dialog>
+
+		<v-dialog v-model="deselectDialog" @esc="deselectDialog = false">
+			<v-card>
+				<v-card-title>Remove file from this item?</v-card-title>
+				<v-card-text>
+					Deselect clears the field only. Delete removes the file from the library if nothing else
+					references it (relations, <code>/assets/</code> links, or JSON/code UUIDs).
+				</v-card-text>
+				<v-card-actions>
+					<v-button secondary :disabled="deselectDeleting" @click="deselectDialog = false">Cancel</v-button>
+					<v-button secondary :disabled="deselectDeleting" @click="confirmDeselectOnly">Deselect only</v-button>
+					<v-button kind="danger" :loading="deselectDeleting" @click="confirmDeselectAndDelete">
+						Deselect &amp; delete if unused
+					</v-button>
 				</v-card-actions>
 			</v-card>
 		</v-dialog>

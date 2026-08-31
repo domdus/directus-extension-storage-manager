@@ -4,6 +4,7 @@ import {
 	type StorageLocationSettings,
 	type StorageManagerSettings,
 } from '../shared/types';
+import { normalizeLifecycleSettings } from '../shared/lifecycle';
 
 /** In-process cache: invalidated whenever settings are saved. */
 let settingsCache: StorageManagerSettings | null = null;
@@ -49,6 +50,9 @@ export async function loadSettings(database: any): Promise<StorageManagerSetting
 		};
 		if (parsed && typeof parsed === 'object' && 'name_mirror_claims' in parsed) {
 			result.name_mirror_claims = normalizeNameMirrorClaims(parsed.name_mirror_claims);
+		}
+		if (parsed && typeof parsed === 'object' && 'lifecycle' in parsed) {
+			result.lifecycle = normalizeLifecycleSettings(parsed.lifecycle);
 		}
 		settingsCache = result;
 		return settingsCache;

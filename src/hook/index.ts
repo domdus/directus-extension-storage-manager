@@ -22,6 +22,7 @@ import {
 } from './name-mirror-claims';
 import { captureNestedFilesForDelete, deleteNestedFileObjects } from './nested-file-delete';
 import { mirrorFileAfterUpload } from './upload-mirror';
+import { registerFileLifecycleHooks } from './file-lifecycle';
 import { STORAGE_MANAGER_FIELD } from '../shared/types';
 
 export default defineHook(({ filter, action }, { database, env, services, getSchema, logger }) => {
@@ -29,6 +30,8 @@ export default defineHook(({ filter, action }, { database, env, services, getSch
 	action('server.start', async () => {
 		await ensureSettingsField(database, services, getSchema, logger);
 	});
+
+	registerFileLifecycleHooks({ filter, action }, { database, services, getSchema, logger });
 
 	// ── Invalidate settings cache whenever settings are saved ──────────────
 	filter('settings.update', (payload: Record<string, any>) => {

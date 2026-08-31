@@ -4,6 +4,7 @@ import OverviewView from './overview-view.vue';
 import StorageView from './storage-view.vue';
 import FoldersView from './folders-view.vue';
 import SettingsView from './settings-view.vue';
+import UnreferencedView from './unreferenced-view.vue';
 
 export default defineModule({
 	id: 'storage-manager',
@@ -13,6 +14,10 @@ export default defineModule({
 		{
 			path: '',
 			component: OverviewView,
+		},
+		{
+			path: 'unreferenced',
+			component: UnreferencedView,
 		},
 		{
 			path: 'storage/:location',

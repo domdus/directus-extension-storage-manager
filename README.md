@@ -8,7 +8,7 @@ Move files between your Directus storages — local disk, S3, Google Cloud, Azur
 
 ![Storage Manager overview with local, local2, S3, and GCS adapters](https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_manager.png)
 
-Directus can use several storages at once, but it will not move existing files for you. Storage Manager does: browse each storage, upload, find files that are on disk but not in Directus, and move files or whole folders.
+Directus can use several storages at once, but it will not move existing files for you. Storage Manager does: browse each storage, upload, find files that are on disk but not in Directus, move files or whole folders, and find File Library entries that nothing uses anymore.
 
 When you open a storage from the overview, the left sidebar shows that storage’s folder tree. Folders load as you expand them, so large storages stay quick to navigate.
 
@@ -92,6 +92,26 @@ Find files that are on a storage but not yet in Directus.
 
 Import adds them to Directus without moving the files. You can also delete leftover files that Directus does not know about. Generated resize/preview files are left alone (use **Thumbnails → Delete All Transforms** at the storage root if you want to clear those).
 
+### Unreferenced Files
+
+Open **Unreferenced Files** from the left sidebar to find File Library items that nothing in your project still uses — leftovers after content was deleted, images that were replaced, or uploads that never got attached.
+
+![Unreferenced Files scan options, summary, and results](https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_unreferenced_files.png)
+
+Set your scan options, then click **Scan**:
+
+- **Min Age** — skip files that were uploaded very recently (so mid-upload or draft files are not flagged yet)
+- **Storage Filter** — limit the search to one storage, or check all
+- **Scan WYSIWYG / JSON Fields** — also look inside rich text and similar content for file links. This can take longer on large sites; turn it off for a faster check of file/image fields only
+
+After a scan you get a short summary and a list of matches (same cards/table layouts as elsewhere in Storage Manager). Select files and choose what to do:
+
+- **Move to Directus Folder** — organize them in the File Library (virtual folders only)
+- **Move to Storage Folder** — relocate them on disk / cloud storage
+- **Delete** — remove them if they are still unused (each file is checked again before delete)
+
+In the right sidebar, **File Lifecycle** sets defaults for the Storage Manager file field interfaces: what should happen when someone clears a file from a field, or when a whole item is deleted (`keep`, `ask`, or delete the file if nothing else uses it).
+
 ### Settings
 
 Check for updates, export or import your Mirror settings, or remove Storage Manager’s saved settings if you uninstall.
@@ -109,7 +129,8 @@ The **Storage Manager** Flow operation can move (or copy) files in automations. 
 5. Browse a storage (or **Directus Folders**) and move or materialize as needed.
 6. At a storage root, open **Thumbnails** in the sidebar if you need to inspect or clear generated image copies.
 7. For collection fields that must land on a specific storage, use **File with Storage**, **Files with Storage**, or **Image with Storage** instead of the native file interfaces.
-8. Use **Dry Run**, then **Move**.
+8. Use **Unreferenced Files** when you want to find leftover File Library entries, then move or delete them.
+9. Use **Dry Run**, then **Move**.
 
 ## Installation
 

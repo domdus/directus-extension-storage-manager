@@ -4,6 +4,7 @@ import {
 	type StorageLocationSettings,
 	type StorageManagerSettings,
 } from './types';
+import { normalizeLifecycleSettings } from './lifecycle';
 
 const VALID_STRATEGIES: PrefixStrategy[] = ['none', 'folder', 'folder_id', 'type', 'date'];
 const VALID_RENAME = ['full_sync', 'leave_old'] as const;
@@ -68,6 +69,9 @@ export function normalizeStorageManagerSettings(raw: unknown): StorageManagerSet
 		result.name_mirror_claims = normalizeNameMirrorClaims(
 			(source as Record<string, unknown>).name_mirror_claims,
 		);
+	}
+	if ('lifecycle' in source) {
+		result.lifecycle = normalizeLifecycleSettings((source as Record<string, unknown>).lifecycle);
 	}
 	return result;
 }

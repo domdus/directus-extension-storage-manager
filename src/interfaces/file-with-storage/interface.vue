@@ -34,11 +34,17 @@ const props = withDefaults(
 		enableCreate?: boolean;
 		enableSelect?: boolean;
 		allowedMimeTypes?: string[];
+		/** keep | ask | delete_if_unreferenced */
+		onDeselect?: string;
+		/** keep | delete_if_unreferenced — applied by API hook on item delete */
+		onItemDelete?: string;
 	}>(),
 	{
 		enableCreate: true,
 		enableSelect: true,
 		storage: 'local',
+		onDeselect: 'keep',
+		onItemDelete: 'keep',
 	},
 );
 
@@ -77,6 +83,59 @@ const {
 });
 
 const { createAllowed } = useRelationPermissionsM2O(relationInfo);
+
+const deselectDialog = ref(false);
+const deselectDeleting = ref(false);
+
+function currentFileId(): string | null {
+	const val = props.value;
+	if (!val) return null;
+	if (typeof val === 'object' && val.id) return String(val.id);
+	return String(val);
+}
+
+async function deleteFileIfUnreferenced(fileId: string) {
+	try {
+		await api.post('/storage-manager/files/delete-if-unreferenced', { file_ids: [fileId] });
+	} catch (error) {
+		unexpectedError(error);
+	}
+}
+
+async function onDeselectAction() {
+	const policy = props.onDeselect || 'keep';
+	const fileId = currentFileId();
+
+	if (policy === 'ask' && fileId) {
+		deselectDialog.value = true;
+		return;
+	}
+
+	if (policy === 'delete_if_unreferenced' && fileId) {
+		remove();
+		await deleteFileIfUnreferenced(fileId);
+		return;
+	}
+
+	remove();
+}
+
+async function confirmDeselectOnly() {
+	deselectDialog.value = false;
+	remove();
+}
+
+async function confirmDeselectAndDelete() {
+	const fileId = currentFileId();
+	deselectDeleting.value = true;
+	try {
+		remove();
+		if (fileId) await deleteFileIfUnreferenced(fileId);
+	} finally {
+		deselectDeleting.value = false;
+		deselectDialog.value = false;
+	}
+}
 
 const fileExtension = computed(() => {
 	if (file.value === null) return null;
@@ -129,7 +188,7 @@ const interfaceOpen = computed(() => Boolean(activeDialog.value) || menuOpen.val
 
 function setSelection(selection: (string | number)[] | null) {
 	if (selection?.[0]) update(selection[0]);
-	else remove();
+	else void onDeselectAction();
 }
 
 function onUpload(fileInfo: FileInfo) {
@@ -236,7 +295,7 @@ function useURLImport() {
 									:item-edits="edits"
 									deselect
 									:disabled="internalDisabled"
-									@action="remove"
+									@action="onDeselectAction"
 								/>
 							</template>
 							<v-icon v-else name="attach_file" />
@@ -244,6 +303,23 @@ function useURLImport() {
 					</v-list-item>
 				</div>
 			</template>
+
+			<v-dialog v-model="deselectDialog" @esc="deselectDialog = false">
+				<v-card>
+					<v-card-title>Remove file from this item?</v-card-title>
+					<v-card-text>
+						Deselect clears the field only. Delete removes the file from the library if nothing else
+						references it (relations, <code>/assets/</code> links, or JSON/code UUIDs).
+					</v-card-text>
+					<v-card-actions>
+						<v-button secondary :disabled="deselectDeleting" @click="deselectDialog = false">Cancel</v-button>
+						<v-button secondary :disabled="deselectDeleting" @click="confirmDeselectOnly">Deselect only</v-button>
+						<v-button kind="danger" :loading="deselectDeleting" @click="confirmDeselectAndDelete">
+							Deselect &amp; delete if unused
+						</v-button>
+					</v-card-actions>
+				</v-card>
+			</v-dialog>
 
 			<v-list>
 				<template v-if="file">

@@ -37,7 +37,8 @@
 
 				<p class="page-intro">
 					Browse, create, and move files and storage folders across your adapters. Use Materialize in
-					Directus Folders view to convert virtual folder hierarchy into physical storage paths.
+					Directus Folders view to convert virtual folder hierarchy into physical storage paths. Use
+					<strong>Unreferenced Files</strong> to find File Library entries nothing still points at.
 				</p>
 
 				<div class="storage-grid">
