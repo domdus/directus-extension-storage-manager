@@ -12,6 +12,7 @@ import {
 	browseStorageFolders,
 	browseStorageFolderTree,
 	copyEmptyStorageFolders,
+	countStorageFolders,
 	createStorageFolder,
 	deleteStorageFolders,
 	ensureFileUnderPath,
@@ -317,7 +318,14 @@ export default {
 				const usageByLocation = await aggregateFileUsageGrouped(database, locations);
 				const storages = await Promise.all(
 					locations.map(async (loc) => {
-						const info = await buildStorageLocationInfo(env, database, loc, usageByLocation.get(loc));
+						const folder_count = await countStorageFolders(database, loc, env);
+						const info = await buildStorageLocationInfo(
+							env,
+							database,
+							loc,
+							usageByLocation.get(loc),
+							folder_count,
+						);
 						info.mirror_directus_folders = isDirectusFolderMirrorEnabled(getLocationSettings(settings, loc));
 						return info;
 					}),
@@ -351,7 +359,8 @@ export default {
 					return;
 				}
 
-				const info = await buildStorageLocationInfo(env, database, location);
+				const folder_count = await countStorageFolders(database, location, env);
+				const info = await buildStorageLocationInfo(env, database, location, undefined, folder_count);
 				const settings = await loadSettings(database);
 				info.mirror_directus_folders = isDirectusFolderMirrorEnabled(getLocationSettings(settings, location));
 				res.json({ data: info });

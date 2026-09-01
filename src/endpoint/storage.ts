@@ -184,8 +184,59 @@ export async function* diskList(disk: StorageDisk, prefix = ''): AsyncGenerator<
 	if (typeof disk.list !== 'function') {
 		throw new Error('Storage disk does not support list() — cannot detect orphan files on this driver');
 	}
-	for await (const filepath of disk.list(prefix)) {
-		yield String(filepath);
+
+	const d = disk as any;
+	const inputPrefix = String(prefix || '');
+
+	/**
+	 * Directus DriverGCS / DriverAzure build list prefixes via `path.join(root, prefix)`.
+	 * When ROOT is empty, `join('', '') === '.'`, so the cloud API is queried with prefix `'.'`
+	 * and only keys that literally start with `.` are returned — empty folders marked as
+	 * `folder/.keep` disappear from browse/nav. S3 remaps `'.' → ''`; GCS/Azure do not.
+	 */
+	if (d?.bucket && typeof d.bucket.getFiles === 'function') {
+		const root = String(d.root || '');
+		let listPrefix =
+			typeof d.fullPath === 'function' ? String(d.fullPath(inputPrefix) || '') : inputPrefix;
+		if (listPrefix === '.') listPrefix = '';
+
+		let query: Record<string, unknown> = {
+			prefix: listPrefix,
+			autoPaginate: false,
+			maxResults: 500,
+		};
+
+		while (query) {
+			const [files, nextQuery] = await d.bucket.getFiles(query);
+			for (const file of files || []) {
+				const raw = String(file?.name || '')
+					.slice(root.length)
+					.replace(/^[/\\]+/, '');
+				if (raw) yield raw;
+			}
+			query = nextQuery;
+		}
+		return;
+	}
+
+	if (d?.containerClient && typeof d.containerClient.listBlobsFlat === 'function') {
+		const root = String(d.root || '');
+		let listPrefix =
+			typeof d.fullPath === 'function' ? String(d.fullPath(inputPrefix) || '') : inputPrefix;
+		if (listPrefix === '.') listPrefix = '';
+
+		for await (const blob of d.containerClient.listBlobsFlat({ prefix: listPrefix })) {
+			const raw = String(blob?.name || '')
+				.slice(root.length)
+				.replace(/^[/\\]+/, '');
+			if (raw) yield raw;
+		}
+		return;
+	}
+
+	for await (const filepath of disk.list(inputPrefix)) {
+		const raw = String(filepath || '').replace(/^[/\\]+/, '');
+		if (raw) yield raw;
 	}
 }
 

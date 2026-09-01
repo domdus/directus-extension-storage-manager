@@ -6,6 +6,7 @@ import { render } from 'micromustache';
 import { computed, inject, ref, toRef, toRefs } from 'vue';
 import Draggable from 'vuedraggable';
 import { useApi } from '@directus/extensions-sdk';
+import { useDeselectPolicy } from '../shared/composables/use-deselect-policy';
 import { useMimeTypeFilter } from '../shared/composables/use-mime-type-filter';
 import { useRelationM2M } from '../shared/composables/use-relation-m2m';
 import {
@@ -46,8 +47,8 @@ const props = withDefaults(
 		enableSelect: true,
 		storage: 'local',
 		limit: 15,
-		onDeselect: 'keep',
-		onItemDelete: 'keep',
+		onDeselect: 'inherit',
+		onItemDelete: 'inherit',
 	},
 );
 
@@ -210,6 +211,8 @@ function fileIdFromDisplayItem(item: DisplayItem): string | null {
 const deselectDialog = ref(false);
 const deselectDeleting = ref(false);
 const pendingRemoveItem = ref<DisplayItem | null>(null);
+const onDeselectProp = toRef(props, 'onDeselect');
+const { effectiveDeselect } = useDeselectPolicy(onDeselectProp);
 
 async function deleteFileIfUnreferenced(fileId: string) {
 	try {
@@ -230,7 +233,7 @@ function applyRemove(item: DisplayItem) {
 }
 
 async function onRemoveFile(item: DisplayItem) {
-	const policy = props.onDeselect || 'keep';
+	const policy = effectiveDeselect.value;
 	const fileId = fileIdFromDisplayItem(item);
 
 	if (policy === 'ask' && fileId) {
@@ -516,13 +519,13 @@ const menuActive = computed(() => editModalActive.value || selectModalActive.val
 				<v-card-title>Remove file from this item?</v-card-title>
 				<v-card-text>
 					Deselect clears the field only. Delete removes the file from the library if nothing else
-					references it (relations, <code>/assets/</code> links, or JSON/code UUIDs).
+					references it.
 				</v-card-text>
 				<v-card-actions>
 					<v-button secondary :disabled="deselectDeleting" @click="deselectDialog = false">Cancel</v-button>
 					<v-button secondary :disabled="deselectDeleting" @click="confirmDeselectOnly">Deselect only</v-button>
 					<v-button kind="danger" :loading="deselectDeleting" @click="confirmDeselectAndDelete">
-						Deselect &amp; delete if unused
+						Delete if unused
 					</v-button>
 				</v-card-actions>
 			</v-card>

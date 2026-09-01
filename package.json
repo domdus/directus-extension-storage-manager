@@ -2,7 +2,7 @@
 	"name": "directus-extension-storage-manager",
 	"description": "Browse, upload, detect, materialize, move Directus files across storages, and find unreferenced File Library entries",
 	"icon": "storage",
-	"version": "1.4.5",
+	"version": "1.5.0",
 	"license": "MIT",
 	"keywords": [
 		"directus",
@@ -58,6 +58,14 @@
 				"source": {
 					"app": "src/operation/app.ts",
 					"api": "src/operation/api.ts"
+				}
+			},
+			{
+				"type": "operation",
+				"name": "storage-manager-unreferenced-scan",
+				"source": {
+					"app": "src/operation/unreferenced-scan/app.ts",
+					"api": "src/operation/unreferenced-scan/api.ts"
 				}
 			},
 			{

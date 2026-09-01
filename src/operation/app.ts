@@ -2,11 +2,11 @@ export default {
 	id: 'storage-manager-operation',
 	name: 'Storage Manager',
 	icon: 'swap_horiz',
-	description: 'Copy or move Directus files between storage adapters (same file id)',
-	overview: ({ mode, target_storage, source_storage, folder_id }: Record<string, unknown>) => [
+	description: 'Copy or move selected Directus files between storage adapters (same file id)',
+	overview: ({ mode, target_storage, folder_id }: Record<string, unknown>) => [
 		{ label: 'Mode', text: String(mode || 'move') },
 		{ label: 'Target', text: String(target_storage || '') },
-		{ label: 'Source', text: String(source_storage || folder_id || 'file_ids') },
+		...(folder_id ? [{ label: 'Folder', text: String(folder_id) }] : []),
 	],
 	options: [
 		{
@@ -32,11 +32,20 @@ export default {
 			type: 'string',
 			meta: {
 				width: 'half',
-				interface: 'input',
-				options: { placeholder: 's3' },
-				note: 'Must match a configured STORAGE_LOCATIONS name.',
+				interface: 'storage-manager-storage-location',
+				note: 'Configured storage adapter to copy or move files onto.',
 			},
 			schema: { required: true },
+		},
+		{
+			field: 'folder_id',
+			name: 'Directus Folder',
+			type: 'uuid',
+			meta: {
+				width: 'half',
+				interface: 'system-folder',
+				note: 'Optional. After a successful migrate, assign those files to this File Library folder. Leave empty to keep each file’s current folder.',
+			},
 		},
 		{
 			field: 'file_ids',
@@ -46,40 +55,9 @@ export default {
 				width: 'full',
 				interface: 'input-code',
 				options: { language: 'json', placeholder: '["uuid-1", "uuid-2"]' },
-				note: 'Optional JSON array of file UUIDs. Leave empty when using source storage or folder.',
+				note: 'JSON array of file UUIDs to copy or move. Required — use Flow data to pass selected or triggered file ids.',
 			},
-		},
-		{
-			field: 'source_storage',
-			name: 'Source Storage',
-			type: 'string',
-			meta: {
-				width: 'half',
-				interface: 'input',
-				options: { placeholder: 'local' },
-				note: 'Migrate all files currently on this storage location.',
-			},
-		},
-		{
-			field: 'folder_id',
-			name: 'Folder ID',
-			type: 'uuid',
-			meta: {
-				width: 'half',
-				interface: 'system-folder',
-				note: 'Migrate files in this folder (optional).',
-			},
-		},
-		{
-			field: 'recursive',
-			name: 'Include Subfolders',
-			type: 'boolean',
-			meta: {
-				width: 'half',
-				interface: 'boolean',
-				note: 'When a folder is selected, also migrate files in nested folders.',
-			},
-			schema: { default_value: true },
+			schema: { required: true },
 		},
 	],
 };

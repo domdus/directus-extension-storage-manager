@@ -25,35 +25,37 @@ const lifecycleFieldOptions = [
 		field: 'onDeselect',
 		name: 'On Deselect',
 		type: 'string',
-		schema: { default_value: 'keep' },
+		schema: { default_value: 'inherit' },
 		meta: {
 			width: 'half',
 			interface: 'select-dropdown',
 			options: {
 				choices: [
+					{ value: 'inherit', text: 'Use File Interfaces default' },
 					{ value: 'keep', text: 'Keep file in library' },
 					{ value: 'ask', text: 'Ask (deselect only vs delete if unused)' },
 					{ value: 'delete_if_unreferenced', text: 'Delete file if unreferenced' },
 				],
 			},
-			note: 'When the file is cleared on this field. “Ask” shows a Studio prompt; delete only runs if nothing else references the file.',
+			note: 'When the file is cleared on this field. “Ask” shows a Studio prompt; delete only runs if nothing else references the file. Inherit uses Storage Manager → File Interfaces.',
 		},
 	},
 	{
 		field: 'onItemDelete',
 		name: 'On Item Delete',
 		type: 'string',
-		schema: { default_value: 'keep' },
+		schema: { default_value: 'inherit' },
 		meta: {
 			width: 'half',
 			interface: 'select-dropdown',
 			options: {
 				choices: [
+					{ value: 'inherit', text: 'Use File Interfaces default' },
 					{ value: 'keep', text: 'Keep file in library' },
 					{ value: 'delete_if_unreferenced', text: 'Delete file if unreferenced' },
 				],
 			},
-			note: 'When the parent item is deleted. Only deletes the file if it is not used elsewhere (relations, /assets/ links, JSON/code UUIDs).',
+			note: 'When the parent item is deleted. Only deletes the file if it is not used elsewhere (relations, /assets/ links, JSON/code UUIDs). Inherit uses Storage Manager → File Interfaces.',
 		},
 	},
 ] as const;

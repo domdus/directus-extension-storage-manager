@@ -47,6 +47,8 @@ Storage Manager adds three interfaces for file fields. Each one works like the b
 
 When you configure the field, set **Folder** and **Storage Location** (for example `local` or `s3`). Every upload from that field uses those settings. If **Mirror Directus Folders** is on for that storage, new files follow your Directus folder tree on disk.
 
+You can also set **On Deselect** and **On Item Delete** on each field, or leave them on **Use File Interfaces default** so they follow the **File Interfaces** page (see below).
+
 ### Thumbnails
 
 At the **top level** of a storage (not inside a subfolder), a **Thumbnails** panel appears in the right sidebar.
@@ -110,7 +112,25 @@ After a scan you get a short summary and a list of matches (same cards/table lay
 - **Move to Storage Folder** — relocate them on disk / cloud storage
 - **Delete** — remove them if they are still unused (each file is checked again before delete)
 
-In the right sidebar, **File Lifecycle** sets defaults for the Storage Manager file field interfaces: what should happen when someone clears a file from a field, or when a whole item is deleted (`keep`, `ask`, or delete the file if nothing else uses it).
+### File Interfaces
+
+Open **File Interfaces** from the left sidebar to set what happens when a file field is cleared, or when the collection item that holds the file is deleted.
+
+![File Interfaces lifecycle defaults for Native Directus and Storage Manager](https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_file_interfaces.png)
+
+Defaults are split into two groups:
+
+- **Native Directus Interfaces** — File / Image / Files. Cleanup runs on save (or when the item is deleted) via hooks. There is no Ask prompt in Studio for native fields.
+- **Storage Manager Interfaces** — File / Image / Files with Storage. Deselect can run immediately in the form. **Ask** shows a Studio dialog so editors can choose deselect only, or delete the file if nothing else still uses it.
+
+For each group you can choose:
+
+| Setting | Options |
+| ------- | ------- |
+| **On deselect** | Keep file in library · Ask (Storage Manager only) · Delete file if unreferenced |
+| **On item delete** | Keep file in library · Delete file if unreferenced |
+
+Storage Manager fields can override these defaults per field in Data Model (including **Use File Interfaces default**). Delete only runs when nothing else still references the file.
 
 ### Settings
 
@@ -118,7 +138,9 @@ Check for updates, export or import your Mirror settings, or remove Storage Mana
 
 ### Flows
 
-The **Storage Manager** Flow operation can move (or copy) files in automations. Copy leaves a leftover on the old storage — it will show up under Detect.
+The **Storage Manager** Flow operation can move (or copy) **selected file IDs** in automations. Pick the target storage from a dropdown of configured locations, optionally assign files to a Directus File Library folder after a successful migrate, and pass an explicit `file_ids` array (for example from a trigger or previous step). It does not migrate an entire storage or folder at once. Copy leaves a leftover on the old storage — it will show up under Detect.
+
+**Scan Unreferenced Files** is a separate Flow operation that runs the same dry-run scan as the module (optional storage filter, min age, text-field scan). It returns `file_ids` (capped list), `unreferenced_count`, `unreferenced_bytes`, and full `meta` so you can chain into migrate or your own follow-up steps. It does not delete anything.
 
 ## Getting started
 
@@ -129,8 +151,9 @@ The **Storage Manager** Flow operation can move (or copy) files in automations. 
 5. Browse a storage (or **Directus Folders**) and move or materialize as needed.
 6. At a storage root, open **Thumbnails** in the sidebar if you need to inspect or clear generated image copies.
 7. For collection fields that must land on a specific storage, use **File with Storage**, **Files with Storage**, or **Image with Storage** instead of the native file interfaces.
-8. Use **Unreferenced Files** when you want to find leftover File Library entries, then move or delete them.
-9. Use **Dry Run**, then **Move**.
+8. Use **File Interfaces** to set default cleanup behaviour when editors clear a file field or delete an item (works for native file fields too).
+9. Use **Unreferenced Files** when you want to find leftover File Library entries, then move or delete them.
+10. Use **Dry Run**, then **Move**.
 
 ## Installation
 

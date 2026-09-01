@@ -151,37 +151,11 @@
 					<component :is="`layout-options-${layout}`" v-bind="layoutState" />
 				</layout-sidebar-detail>
 
-				<sidebar-detail id="lifecycle" icon="policy" title="File Lifecycle" :close="false">
-					<p class="sidebar-text sidebar-text--spaced">
-						Defaults for File / Image / Files with Storage Interfaces. Per-field options override these.
-					</p>
-					<div class="side-field">
-						<label>Default on deselect</label>
-						<v-select
-							v-model="lifecycle.on_deselect"
-							:items="deselectChoices"
-							:disabled="lifecycleSaving || scanning"
-						/>
-					</div>
-					<div class="side-field">
-						<label>Default on item delete</label>
-						<v-select
-							v-model="lifecycle.on_item_delete"
-							:items="itemDeleteChoices"
-							:disabled="lifecycleSaving || scanning"
-						/>
-					</div>
-					<v-button
-						small
-						block
-						:loading="lifecycleSaving"
-						:disabled="lifecycleSaving || scanning"
-						@click="saveLifecyclePolicies"
-					>
-						Save defaults
-					</v-button>
-					<p v-if="lifecycleMessage" class="lifecycle-msg" :class="lifecycleMessage.type">
-						{{ lifecycleMessage.text }}
+				<sidebar-detail id="about" icon="info" title="About" :close="false">
+					<p class="sidebar-text">
+						Finds File Library entries that nothing still references. For automatic cleanup when fields are
+						cleared or items are deleted, open
+						<button type="button" class="text-link" @click="goFileInterfaces">File Interfaces</button>.
 					</p>
 				</sidebar-detail>
 			</template>
@@ -452,7 +426,7 @@ import { useStorageLocationBadges } from './composables/use-storage-location-bad
 import { useStorageManager } from './composables/use-storage-manager';
 import { mergeFilters } from './utils/filters';
 import { formatBytes } from '../shared/format';
-import { LIFECYCLE_DEFAULTS } from '../shared/lifecycle';
+import { LIFECYCLE_DEFAULTS, normalizeLifecycleSettings } from '../shared/lifecycle';
 
 type ScanMeta = UnreferencedScanMeta;
 
@@ -529,9 +503,7 @@ const moveDestinationHint = computed(() => {
 	return `Files will be moved to ${dest}`;
 });
 
-const lifecycle = reactive({ ...LIFECYCLE_DEFAULTS });
-const lifecycleSaving = ref(false);
-const lifecycleMessage = ref<{ type: 'success' | 'danger'; text: string } | null>(null);
+const lifecycle = reactive(normalizeLifecycleSettings(LIFECYCLE_DEFAULTS));
 const storageFilter = ref<string | null>(null);
 
 const storageFilterChoices = computed(() =>
@@ -540,17 +512,6 @@ const storageFilterChoices = computed(() =>
 		value: s.location,
 	})),
 );
-
-const deselectChoices = [
-	{ text: 'Keep file in library', value: 'keep' },
-	{ text: 'Ask (deselect vs delete if unused)', value: 'ask' },
-	{ text: 'Delete file if unreferenced', value: 'delete_if_unreferenced' },
-];
-
-const itemDeleteChoices = [
-	{ text: 'Keep file in library', value: 'keep' },
-	{ text: 'Delete file if unreferenced', value: 'delete_if_unreferenced' },
-];
 
 const { layout, layoutOptions, layoutQuery, filter, search, resetPreset, resetPage } = useFilesBrowserPreset();
 const { layoutWrapper } = useLayout(layout);
@@ -600,6 +561,10 @@ function clearFilters() {
 	filter.value = null;
 	search.value = null;
 	resetPage();
+}
+
+function goFileInterfaces() {
+	router.push('/storage-manager/file-interfaces');
 }
 
 function fileDetailPath(id: string | number) {
@@ -671,33 +636,8 @@ async function refreshLayout() {
 
 async function patchLifecycle(partial: Record<string, unknown>) {
 	await api.patch('/storage-manager/settings', {
-		lifecycle: {
-			on_deselect: lifecycle.on_deselect,
-			on_item_delete: lifecycle.on_item_delete,
-			scan_min_age_minutes: Number(lifecycle.scan_min_age_minutes) || 0,
-			scan_text_fields: Boolean(lifecycle.scan_text_fields),
-			...partial,
-		},
+		lifecycle: partial,
 	});
-}
-
-async function saveLifecyclePolicies() {
-	lifecycleSaving.value = true;
-	lifecycleMessage.value = null;
-	try {
-		await patchLifecycle({
-			on_deselect: lifecycle.on_deselect,
-			on_item_delete: lifecycle.on_item_delete,
-		});
-		lifecycleMessage.value = { type: 'success', text: 'Lifecycle defaults saved.' };
-	} catch (err: any) {
-		lifecycleMessage.value = {
-			type: 'danger',
-			text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Save failed',
-		};
-	} finally {
-		lifecycleSaving.value = false;
-	}
 }
 
 /** Persist current scan options when Scan runs (no separate Save control). */
@@ -969,7 +909,12 @@ onMounted(async () => {
 		await loadStorages().catch(() => undefined);
 		const res = await api.get('/storage-manager/settings');
 		const lc = res.data?.data?.lifecycle;
-		if (lc) Object.assign(lifecycle, lc);
+		if (lc) {
+			const normalized = normalizeLifecycleSettings(lc);
+			Object.assign(lifecycle, normalized);
+			Object.assign(lifecycle.native, normalized.native);
+			Object.assign(lifecycle.storage_manager, normalized.storage_manager);
+		}
 	} catch {
 		/* defaults */
 	}
@@ -1182,39 +1127,24 @@ onMounted(async () => {
 	color: var(--theme--foreground-subdued);
 }
 
-.sidebar-text--spaced {
-	margin-bottom: 0.85rem;
+.text-link {
+	display: inline;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--theme--primary);
+	font: inherit;
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.text-link:hover {
+	text-decoration: underline;
 }
 
 .sidebar-text code {
 	font-family: var(--theme--fonts--monospace--font-family, monospace);
 	font-size: 0.9em;
-}
-
-.side-field {
-	display: flex;
-	flex-direction: column;
-	gap: 0.35rem;
-	margin-bottom: 0.85rem;
-}
-
-.side-field label {
-	font-size: 0.75rem;
-	font-weight: 600;
-	color: var(--theme--foreground-subdued);
-}
-
-.lifecycle-msg {
-	margin: 0.65rem 0 0;
-	font-size: 0.8rem;
-}
-
-.lifecycle-msg.success {
-	color: var(--theme--success);
-}
-
-.lifecycle-msg.danger {
-	color: var(--theme--danger);
 }
 
 .move-hint {

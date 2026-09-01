@@ -38,7 +38,9 @@
 				<p class="page-intro">
 					Browse, create, and move files and storage folders across your adapters. Use Materialize in
 					Directus Folders view to convert virtual folder hierarchy into physical storage paths. Use
-					<strong>Unreferenced Files</strong> to find File Library entries nothing still points at.
+					<strong>Unreferenced Files</strong> to find leftover File Library entries, and
+					<strong>File Interfaces</strong> to set automatic cleanup when fields are cleared or items are
+					deleted (including native Directus File / Image / Files fields).
 				</p>
 
 				<div class="storage-grid">
@@ -55,8 +57,14 @@
 						<usage-bar :usage="storage" />
 
 						<div class="meta">
-							<span class="tag">{{ storage.file_count.toLocaleString() }} files</span>
-							<span v-if="storage.folder_count" class="tag">{{ storage.folder_count.toLocaleString() }} folders</span>
+							<span class="tag"
+								>{{ storage.file_count.toLocaleString() }}
+								{{ storage.file_count === 1 ? 'file' : 'files' }}</span
+							>
+							<span class="tag"
+								>{{ (storage.folder_count ?? 0).toLocaleString() }}
+								{{ (storage.folder_count ?? 0) === 1 ? 'folder' : 'folders' }}</span
+							>
 							<span
 								v-if="storage.root"
 								class="tag tag-path"

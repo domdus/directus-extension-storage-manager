@@ -4,6 +4,7 @@ import { deepMap } from '@directus/utils';
 import { useApi } from '@directus/extensions-sdk';
 import { render } from 'micromustache';
 import { computed, inject, ref, toRef, toRefs } from 'vue';
+import { useDeselectPolicy } from '../shared/composables/use-deselect-policy';
 import { useMimeTypeFilter } from '../shared/composables/use-mime-type-filter';
 import { useRelationM2O } from '../shared/composables/use-relation-m2o';
 import { useRelationPermissionsM2O } from '../shared/composables/use-relation-permissions';
@@ -34,17 +35,17 @@ const props = withDefaults(
 		enableCreate?: boolean;
 		enableSelect?: boolean;
 		allowedMimeTypes?: string[];
-		/** keep | ask | delete_if_unreferenced */
+		/** inherit | keep | ask | delete_if_unreferenced */
 		onDeselect?: string;
-		/** keep | delete_if_unreferenced — applied by API hook on item delete */
+		/** inherit | keep | delete_if_unreferenced — applied by API hook on item delete */
 		onItemDelete?: string;
 	}>(),
 	{
 		enableCreate: true,
 		enableSelect: true,
 		storage: 'local',
-		onDeselect: 'keep',
-		onItemDelete: 'keep',
+		onDeselect: 'inherit',
+		onItemDelete: 'inherit',
 	},
 );
 
@@ -86,6 +87,8 @@ const { createAllowed } = useRelationPermissionsM2O(relationInfo);
 
 const deselectDialog = ref(false);
 const deselectDeleting = ref(false);
+const onDeselectProp = toRef(props, 'onDeselect');
+const { effectiveDeselect } = useDeselectPolicy(onDeselectProp);
 
 function currentFileId(): string | null {
 	const val = props.value;
@@ -103,10 +106,11 @@ async function deleteFileIfUnreferenced(fileId: string) {
 }
 
 async function onDeselectAction() {
-	const policy = props.onDeselect || 'keep';
+	const policy = effectiveDeselect.value;
 	const fileId = currentFileId();
 
 	if (policy === 'ask' && fileId) {
+		menuOpen.value = false;
 		deselectDialog.value = true;
 		return;
 	}
@@ -184,7 +188,9 @@ const internalDisabled = computed(
 	() => props.disabled || (props.enableCreate === false && props.enableSelect === false),
 );
 
-const interfaceOpen = computed(() => Boolean(activeDialog.value) || menuOpen.value || editDrawerActive.value);
+const interfaceOpen = computed(
+	() => Boolean(activeDialog.value) || menuOpen.value || editDrawerActive.value || deselectDialog.value,
+);
 
 function setSelection(selection: (string | number)[] | null) {
 	if (selection?.[0]) update(selection[0]);
@@ -304,23 +310,6 @@ function useURLImport() {
 				</div>
 			</template>
 
-			<v-dialog v-model="deselectDialog" @esc="deselectDialog = false">
-				<v-card>
-					<v-card-title>Remove file from this item?</v-card-title>
-					<v-card-text>
-						Deselect clears the field only. Delete removes the file from the library if nothing else
-						references it (relations, <code>/assets/</code> links, or JSON/code UUIDs).
-					</v-card-text>
-					<v-card-actions>
-						<v-button secondary :disabled="deselectDeleting" @click="deselectDialog = false">Cancel</v-button>
-						<v-button secondary :disabled="deselectDeleting" @click="confirmDeselectOnly">Deselect only</v-button>
-						<v-button kind="danger" :loading="deselectDeleting" @click="confirmDeselectAndDelete">
-							Deselect &amp; delete if unused
-						</v-button>
-					</v-card-actions>
-				</v-card>
-			</v-dialog>
-
 			<v-list>
 				<template v-if="file">
 					<v-list-item
@@ -355,6 +344,23 @@ function useURLImport() {
 				</template>
 			</v-list>
 		</v-menu>
+
+		<v-dialog v-model="deselectDialog" @esc="deselectDialog = false">
+			<v-card>
+				<v-card-title>Remove file from this item?</v-card-title>
+				<v-card-text>
+					Deselect clears the field only. Delete removes the file from the library if nothing else
+					references it.
+				</v-card-text>
+				<v-card-actions>
+					<v-button secondary :disabled="deselectDeleting" @click="deselectDialog = false">Cancel</v-button>
+					<v-button secondary :disabled="deselectDeleting" @click="confirmDeselectOnly">Deselect only</v-button>
+					<v-button kind="danger" :loading="deselectDeleting" @click="confirmDeselectAndDelete">
+						Delete if unused
+					</v-button>
+				</v-card-actions>
+			</v-card>
+		</v-dialog>
 
 		<drawer-item
 			v-if="file"
@@ -447,11 +453,14 @@ function useURLImport() {
 .v-list-item.activator.disabled:not(.non-editable) {
 	--v-list-item-color: var(--theme--foreground-subdued);
 	--v-list-item-background-color: var(--theme--form--field--input--background-subdued);
+	--v-list-item-border-color: var(--v-input-border-color, var(--theme--form--field--input--border-color));
 }
 
 .v-list-item.activator.active:not(.disabled),
-.v-list-item.activator:focus-within:not(.disabled) {
+.v-list-item.activator:focus-within:not(.disabled),
+.v-list-item.activator:focus-visible:not(.disabled) {
 	--v-list-item-border-color: var(--v-input-border-color-focus, var(--theme--form--field--input--border-color-focus));
+	--v-list-item-border-color-hover: var(--v-list-item-border-color);
 	box-shadow: var(--theme--form--field--input--box-shadow-focus);
 }
 
@@ -463,6 +472,7 @@ function useURLImport() {
 }
 
 .preview {
+	--v-icon-color: var(--theme--form--field--input--foreground-subdued);
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -490,10 +500,11 @@ function useURLImport() {
 
 .preview.is-svg img {
 	object-fit: contain;
+	filter: drop-shadow(0 0 8px rgb(0 0 0 / 0.25));
 }
 
 .placeholder {
-	color: var(--theme--foreground-subdued);
+	color: var(--v-input-placeholder-color, var(--theme--foreground-subdued));
 }
 
 .extension {

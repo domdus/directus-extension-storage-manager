@@ -1,27 +1,43 @@
 <script setup lang="ts">
 import { useApi } from '@directus/extensions-sdk';
-import { onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 
 type StorageChoice = {
 	text: string;
 	value: string;
 };
 
-const props = defineProps<{
-	value?: string | null;
-	disabled?: boolean;
-}>();
+const props = withDefaults(
+	defineProps<{
+		value?: string | null;
+		disabled?: boolean;
+		/** When true, allow empty selection (“All Storages”). */
+		includeAll?: boolean;
+	}>(),
+	{
+		includeAll: false,
+	},
+);
 
 const emit = defineEmits<{
-	input: [value: string];
+	input: [value: string | null];
 }>();
 
 const api = useApi();
 const choices = ref<StorageChoice[]>([]);
 const loading = ref(true);
 
+const items = computed(() => {
+	if (!props.includeAll) return choices.value;
+	return [{ value: '', text: 'All Storages' }, ...choices.value];
+});
+
 function emitValue(value: string | null | undefined) {
-	const next = String(value || '').trim();
+	const next = value == null ? '' : String(value).trim();
+	if (props.includeAll) {
+		emit('input', next || null);
+		return;
+	}
 	if (next) emit('input', next);
 }
 
@@ -42,6 +58,12 @@ onMounted(async () => {
 		if (next.length) {
 			choices.value = next;
 			const current = String(props.value || '').trim();
+			if (props.includeAll) {
+				if (current && !next.some((c) => c.value === current)) {
+					emitValue(null);
+				}
+				return;
+			}
 			if (!current || !next.some((c) => c.value === current)) {
 				const preferred = next.find((c) => c.value === 'local')?.value || next[0]!.value;
 				emitValue(preferred);
@@ -53,7 +75,7 @@ onMounted(async () => {
 	} finally {
 		if (!choices.value.length) {
 			choices.value = [{ value: 'local', text: 'local' }];
-			if (!props.value) emitValue('local');
+			if (!props.includeAll && !props.value) emitValue('local');
 		}
 		loading.value = false;
 	}
@@ -62,7 +84,8 @@ onMounted(async () => {
 watch(
 	() => props.value,
 	(value) => {
-		if (!loading.value && !value && choices.value.length) {
+		if (loading.value || props.includeAll) return;
+		if (!value && choices.value.length) {
 			emitValue(choices.value.find((c) => c.value === 'local')?.value || choices.value[0]!.value);
 		}
 	},
@@ -71,13 +94,14 @@ watch(
 
 <template>
 	<v-select
-		:model-value="value"
-		:items="choices"
+		:model-value="value ?? ''"
+		:items="items"
 		item-text="text"
 		item-value="value"
 		:disabled="disabled || loading"
 		:loading="loading"
-		placeholder="Storage location"
+		:placeholder="includeAll ? 'All Storages' : 'Storage location'"
+		:show-deselect="includeAll"
 		@update:model-value="emitValue"
 	/>
 </template>

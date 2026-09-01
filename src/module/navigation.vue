@@ -48,6 +48,8 @@ const isSettings = computed(() => route.path.startsWith('/storage-manager/settin
 
 const isUnreferenced = computed(() => route.path.startsWith('/storage-manager/unreferenced'));
 
+const isFileInterfaces = computed(() => route.path.startsWith('/storage-manager/file-interfaces'));
+
 watch([currentFolder, loading, folders], setOpenFolders, { immediate: true });
 watch([currentStorage, currentStoragePath], () => {
 	setOpenStorageFolders();
@@ -94,6 +96,10 @@ function goSettings() {
 
 function goUnreferenced() {
 	router.push('/storage-manager/unreferenced');
+}
+
+function goFileInterfaces() {
+	router.push('/storage-manager/file-interfaces');
 }
 
 async function syncStorageNavTree() {
@@ -229,6 +235,15 @@ function setOpenStorageFolders() {
 			</v-list-item-icon>
 			<v-list-item-content>
 				<v-text-overflow text="Unreferenced Files" />
+			</v-list-item-content>
+		</v-list-item>
+
+		<v-list-item clickable :active="isFileInterfaces" @click="goFileInterfaces">
+			<v-list-item-icon>
+				<v-icon name="widgets" />
+			</v-list-item-icon>
+			<v-list-item-content>
+				<v-text-overflow text="File Interfaces" />
 			</v-list-item-content>
 		</v-list-item>
 

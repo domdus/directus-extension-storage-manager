@@ -5,6 +5,7 @@ import StorageView from './storage-view.vue';
 import FoldersView from './folders-view.vue';
 import SettingsView from './settings-view.vue';
 import UnreferencedView from './unreferenced-view.vue';
+import FileInterfacesView from './file-interfaces-view.vue';
 
 export default defineModule({
 	id: 'storage-manager',
@@ -34,6 +35,10 @@ export default defineModule({
 		{
 			path: 'folders/:folderId',
 			component: FoldersView,
+		},
+		{
+			path: 'file-interfaces',
+			component: FileInterfacesView,
 		},
 		{
 			path: 'settings',

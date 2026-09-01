@@ -407,8 +407,8 @@ export async function countStorageFolders(
 	env: Record<string, unknown>,
 ): Promise<number> {
 	try {
-		const { folders } = await browseStorageFolders(database, location, '', env);
-		return folders.length;
+		const paths = await listStorageFolderPaths(database, location, env);
+		return paths.length;
 	} catch {
 		return 0;
 	}

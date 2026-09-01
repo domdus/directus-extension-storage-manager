@@ -16,33 +16,10 @@ type OperationInput = {
 	mode?: MigrateMode;
 	target_storage?: string;
 	file_ids?: string[] | string;
-	source_storage?: string;
+	/** Optional File Library folder to assign after a successful migrate. */
 	folder_id?: string | null;
-	recursive?: boolean;
 	concurrency?: number | string;
 };
-
-async function collectFolderIds(database: any, rootId: string, recursive: boolean): Promise<string[]> {
-	if (!recursive) return [rootId];
-
-	const all = await database('directus_folders').select('id', 'parent');
-	const childrenMap = new Map<string | null, string[]>();
-	for (const row of all) {
-		const parent = row.parent == null ? null : String(row.parent);
-		const id = String(row.id);
-		if (!childrenMap.has(parent)) childrenMap.set(parent, []);
-		childrenMap.get(parent)!.push(id);
-	}
-
-	const result: string[] = [];
-	const stack = [String(rootId)];
-	while (stack.length) {
-		const current = stack.pop()!;
-		result.push(current);
-		for (const kid of childrenMap.get(current) || []) stack.push(kid);
-	}
-	return result;
-}
 
 function parseFileIds(value: unknown): string[] {
 	if (!value) return [];
@@ -76,37 +53,31 @@ export default {
 			throw new Error(`Unknown target storage "${target}". Available: ${locations.join(', ')}`);
 		}
 
-		let fileIds = parseFileIds(input.file_ids);
+		const fileIds = parseFileIds(input.file_ids);
+		if (!fileIds.length) {
+			throw new Error('file_ids is required (JSON array of file UUIDs)');
+		}
 
-		if (fileIds.length === 0) {
-			const query = database('directus_files').select('id');
+		const folderId =
+			input.folder_id != null && String(input.folder_id).trim()
+				? String(input.folder_id).trim()
+				: null;
 
-			if (input.source_storage) {
-				const source = String(input.source_storage).trim();
-				if (!locations.includes(source)) {
-					throw new Error(`Unknown source storage "${source}"`);
-				}
-				query.where('storage', source);
+		if (folderId) {
+			const folder = await database('directus_folders').select('id').where({ id: folderId }).first();
+			if (!folder) {
+				throw new Error(`Unknown Directus folder "${folderId}"`);
 			}
-
-			if (input.folder_id) {
-				const folderIds = await collectFolderIds(database, String(input.folder_id), input.recursive !== false);
-				query.whereIn('folder', folderIds);
-			}
-
-			if (!input.source_storage && !input.folder_id) {
-				throw new Error('Provide file_ids, source_storage, and/or folder_id');
-			}
-
-			const rows = await query;
-			fileIds = rows.map((r: { id: string }) => String(r.id));
 		}
 
 		const concurrency = input.concurrency != null ? parseInt(String(input.concurrency), 10) : 1;
 
-		logger.info(`[storage-manager-operation] ${mode} ${fileIds.length} file(s) → ${target}`);
+		logger.info(
+			`[storage-manager-operation] ${mode} ${fileIds.length} file(s) → ${target}` +
+				(folderId ? ` (folder ${folderId})` : ''),
+		);
 
-		return await migrateFiles({
+		const response = await migrateFiles({
 			fileIds,
 			targetStorage: target,
 			mode,
@@ -114,5 +85,19 @@ export default {
 			database,
 			logger,
 		});
+
+		if (folderId) {
+			const okIds = (response.results || [])
+				.filter((r) => r.status === 'moved' || r.status === 'copied')
+				.map((r) => String(r.id));
+			if (okIds.length) {
+				await database('directus_files').whereIn('id', okIds).update({ folder: folderId });
+				logger.info(
+					`[storage-manager-operation] Assigned ${okIds.length} file(s) to Directus folder ${folderId}`,
+				);
+			}
+		}
+
+		return response;
 	},
 };

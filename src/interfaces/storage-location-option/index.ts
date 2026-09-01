@@ -10,5 +10,17 @@ export default defineInterface({
 	types: ['string'],
 	group: 'other',
 	system: true,
-	options: null,
+	options: [
+		{
+			field: 'includeAll',
+			name: 'Include “All Storages”',
+			type: 'boolean',
+			meta: {
+				width: 'half',
+				interface: 'boolean',
+				note: 'Adds an empty “All Storages” choice (useful for optional filters).',
+			},
+			schema: { default_value: false },
+		},
+	],
 });

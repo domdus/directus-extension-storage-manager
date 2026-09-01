@@ -58,12 +58,14 @@ const primaryText = computed(() => {
 	if (showMeter.value) {
 		return `${formatPercent(props.usage.disk_used_percent)} used · ${formatBytes(props.usage.disk_used_bytes)} / ${formatBytes(props.usage.disk_total_bytes)}`;
 	}
-	return `${props.usage.file_count.toLocaleString()} files · ${formatBytes(props.usage.total_bytes)}`;
+	const fileLabel = props.usage.file_count === 1 ? 'file' : 'files';
+	return `${props.usage.file_count.toLocaleString()} ${fileLabel} · ${formatBytes(props.usage.total_bytes)}`;
 });
 
 const secondaryText = computed(() => {
 	if (showMeter.value) {
-		return `${props.usage.file_count.toLocaleString()} files in Directus · ${formatBytes(props.usage.total_bytes)} · ${formatBytes(props.usage.disk_free_bytes)} free`;
+		const fileLabel = props.usage.file_count === 1 ? 'file' : 'files';
+		return `${props.usage.file_count.toLocaleString()} ${fileLabel} in Directus · ${formatBytes(props.usage.total_bytes)} · ${formatBytes(props.usage.disk_free_bytes)} free`;
 	}
 	return 'Cloud quota not available — showing Directus-tracked size';
 });
