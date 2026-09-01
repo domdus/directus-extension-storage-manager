@@ -109,9 +109,9 @@ const BATCH = 500;
 /** Chunk size when walking `directus_files` (keyset). */
 const FILE_CHUNK = 5_000;
 /**
- * Cap ids returned for the native layout `id._in` filter.
- * Directus querystring parsing defaults `QUERYSTRING_ARRAY_LIMIT` to 100–500;
- * larger `_in` lists are truncated/mishandled and the grid renders empty.
+ * Cap ids returned for Studio selection / paging in one scan batch.
+ * The layout only puts the current page of ids into `id._in` (see unreferenced-view),
+ * so this is no longer bound to querystring array limits.
  * Full `unreferenced_count` / `unreferenced_bytes` still cover every match.
  */
 const MAX_IDS_RETURNED = 500;

@@ -434,10 +434,17 @@ type ScanMeta = UnreferencedScanMeta;
 const EMPTY_ID = '00000000-0000-4000-8000-000000000000';
 
 /**
- * Must stay ≤ Directus `QUERYSTRING_ARRAY_LIMIT` (default 100–500).
- * Larger `_in` filters make the host layout return no rows.
+ * Max IDs allowed in one layout/files querystring `_in` filter.
+ * 500 UUIDs as `filter[id][_in][n]=…` blows past common proxy URL limits (ERR_CONNECTION_RESET).
+ * Paging is done by swapping this slice; the API request always uses page=1.
  */
-const LAYOUT_IDS_SAFE_MAX = 500;
+const LAYOUT_PAGE_IDS_MAX = 100;
+
+/** Max ids kept client-side for select / move / delete in one scan batch. */
+const LISTED_IDS_MAX = 500;
+
+/** Safe chunk size for ad-hoc `/files?filter[id][_in]=…` GETs. */
+const FILES_QUERY_IDS_CHUNK = 50;
 
 const api = useApi();
 const route = useRoute();
@@ -464,6 +471,8 @@ const deleteSelectionBytes = ref<number | null>(null);
 const deleteSizeLoading = ref(false);
 const meta = ref<ScanMeta | null>(null);
 const unreferencedIds = ref<string[]>([]);
+/** Client-side page over `unreferencedIds` (API query always uses page 1 + sliced `_in`). */
+const listPage = ref(1);
 
 /** Same as folders browser: `?file=` drives the item drawer. */
 const activeFileId = computed(() => {
@@ -520,9 +529,49 @@ const showStorageLocationLabels = computed(() => scannedOnce.value);
 
 const defaultTabularFields = ['title', 'type', 'filesize', 'modified_on'];
 
+function clampLayoutLimit(raw: unknown): number {
+	const n = Number(raw);
+	if (!Number.isFinite(n) || n <= 0) return 25;
+	return Math.min(n, LAYOUT_PAGE_IDS_MAX);
+}
+
+/** Keep per-page ≤ LAYOUT_PAGE_IDS_MAX so `_in` URLs stay proxy-safe. */
+watch(
+	() => layoutQuery.value?.limit,
+	(lim) => {
+		const clamped = clampLayoutLimit(lim);
+		if (Number(lim) !== clamped) {
+			layoutQuery.value = { ...layoutQuery.value, limit: clamped, page: 1 };
+			listPage.value = 1;
+		}
+	},
+	{ immediate: true },
+);
+
+watch(
+	() => layoutQuery.value?.page,
+	(page) => {
+		// Paging is done by swapping `_in` IDs; the files request must always be page 1.
+		if (Number(page) !== 1) {
+			layoutQuery.value = { ...layoutQuery.value, page: 1 };
+		}
+	},
+	{ immediate: true },
+);
+
+const layoutLimit = computed(() => clampLayoutLimit(layoutQuery.value?.limit));
+
+const pageIds = computed(() => {
+	const ids = unreferencedIds.value;
+	if (!ids.length) return [] as string[];
+	const limit = layoutLimit.value;
+	const start = (Math.max(1, listPage.value) - 1) * limit;
+	return ids.slice(start, start + limit);
+});
+
 const effectiveLayoutQuery = computed({
 	get() {
-		const query = { ...layoutQuery.value };
+		const query = { ...layoutQuery.value, page: 1, limit: layoutLimit.value };
 		if (!showStorageLocationLabels.value || layout.value !== 'tabular') {
 			return query;
 		}
@@ -535,7 +584,14 @@ const effectiveLayoutQuery = computed({
 		return { ...query, fields };
 	},
 	set(value) {
-		layoutQuery.value = value;
+		const next = { ...(value || {}) };
+		const clamped = clampLayoutLimit(next.limit);
+		next.limit = clamped;
+		next.page = 1;
+		if (clamped !== clampLayoutLimit(layoutQuery.value?.limit)) {
+			listPage.value = 1;
+		}
+		layoutQuery.value = next;
 	},
 });
 
@@ -547,19 +603,25 @@ useStorageLocationBadges({
 });
 
 const systemFilter = computed(() => {
-	const ids = unreferencedIds.value.length ? unreferencedIds.value : [EMPTY_ID];
+	const ids = pageIds.value.length ? pageIds.value : [EMPTY_ID];
 	return { id: { _in: ids } };
 });
 
 const layoutFilter = computed(() => mergeFilters(filter.value, systemFilter.value));
 
+watch(listPage, () => {
+	refreshLayout().catch(() => undefined);
+});
+
 watch([filter, search], () => {
+	listPage.value = 1;
 	resetPage();
 });
 
 function clearFilters() {
 	filter.value = null;
 	search.value = null;
+	listPage.value = 1;
 	resetPage();
 }
 
@@ -593,10 +655,18 @@ function clearFileQuery() {
 
 function bindLayout(layoutState: Record<string, any>) {
 	const pkField = layoutState.primaryKeyField?.field || 'id';
+	const total = unreferencedIds.value.length;
 
 	return {
 		...layoutState,
 		hasPrependContent: false,
+		/** Real page over the listed batch (fetch uses page=1 + sliced `_in`). */
+		page: listPage.value,
+		totalCount: scannedOnce.value ? total : layoutState.totalCount,
+		itemCount: scannedOnce.value ? total : layoutState.itemCount,
+		toPage(newPage: number) {
+			listPage.value = Math.max(1, Number(newPage) || 1);
+		},
 		getLinkForItem(item: Record<string, any>) {
 			const id = item?.[pkField];
 			if (id == null) return;
@@ -650,7 +720,7 @@ async function persistScanOptions() {
 
 async function applyScanMeta(next: ScanMeta) {
 	const ids = Array.isArray(next.ids) ? next.ids.map(String) : [];
-	const listed = ids.slice(0, LAYOUT_IDS_SAFE_MAX);
+	const listed = ids.slice(0, LISTED_IDS_MAX);
 	const truncated = Boolean(next.ids_truncated) || ids.length > listed.length || next.unreferenced_count > listed.length;
 
 	meta.value = {
@@ -659,6 +729,7 @@ async function applyScanMeta(next: ScanMeta) {
 		ids_truncated: truncated,
 	};
 	unreferencedIds.value = listed;
+	listPage.value = 1;
 	scannedOnce.value = true;
 	error.value = '';
 	resetPage();
@@ -706,10 +777,9 @@ watch(scanJobResult, async (next) => {
 });
 
 async function sumSelectionFilesize(ids: string[]): Promise<number> {
-	const CHUNK = 500;
 	let total = 0;
-	for (let i = 0; i < ids.length; i += CHUNK) {
-		const chunk = ids.slice(i, i + CHUNK);
+	for (let i = 0; i < ids.length; i += FILES_QUERY_IDS_CHUNK) {
+		const chunk = ids.slice(i, i + FILES_QUERY_IDS_CHUNK);
 		const res = await api.get('/files', {
 			params: {
 				limit: chunk.length,
@@ -844,14 +914,18 @@ async function moveToStorageFolder() {
 	movingStorage.value = true;
 	try {
 		const fileIds = selection.value.map(String);
-		const res = await api.get('/files', {
-			params: {
-				limit: -1,
-				fields: ['id', 'storage'],
-				filter: JSON.stringify({ id: { _in: fileIds } }),
-			},
-		});
-		const rows = (res.data?.data || []) as Array<{ id: string; storage: string }>;
+		const rows: Array<{ id: string; storage: string }> = [];
+		for (let i = 0; i < fileIds.length; i += FILES_QUERY_IDS_CHUNK) {
+			const chunk = fileIds.slice(i, i + FILES_QUERY_IDS_CHUNK);
+			const res = await api.get('/files', {
+				params: {
+					limit: chunk.length,
+					fields: ['id', 'storage'],
+					filter: JSON.stringify({ id: { _in: chunk } }),
+				},
+			});
+			rows.push(...((res.data?.data || []) as Array<{ id: string; storage: string }>));
+		}
 		const needCross = rows.filter((r) => String(r.storage) !== targetLoc).map((r) => String(r.id));
 
 		if (!needCross.length) {
