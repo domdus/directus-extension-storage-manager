@@ -108,8 +108,13 @@ const TEXT_SCAN_TYPES = new Set(['text', 'json', 'csv']);
 const BATCH = 500;
 /** Chunk size when walking `directus_files` (keyset). */
 const FILE_CHUNK = 5_000;
-/** Cap ids returned to the browser for `_in` filters (count still tracks all). */
-const MAX_IDS_RETURNED = 100_000;
+/**
+ * Cap ids returned for the native layout `id._in` filter.
+ * Directus querystring parsing defaults `QUERYSTRING_ARRAY_LIMIT` to 100–500;
+ * larger `_in` lists are truncated/mishandled and the grid renders empty.
+ * Full `unreferenced_count` / `unreferenced_bytes` still cover every match.
+ */
+const MAX_IDS_RETURNED = 500;
 
 function isSafeIdent(name: string): boolean {
 	return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);

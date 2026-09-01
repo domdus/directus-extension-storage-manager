@@ -459,6 +459,12 @@ type ScanMeta = UnreferencedScanMeta;
 /** Sentinel UUID so the layout filter matches nothing before the first scan. */
 const EMPTY_ID = '00000000-0000-4000-8000-000000000000';
 
+/**
+ * Must stay ≤ Directus `QUERYSTRING_ARRAY_LIMIT` (default 100–500).
+ * Larger `_in` filters make the host layout return no rows.
+ */
+const LAYOUT_IDS_SAFE_MAX = 500;
+
 const api = useApi();
 const route = useRoute();
 const router = useRouter();
@@ -703,9 +709,16 @@ async function persistScanOptions() {
 }
 
 async function applyScanMeta(next: ScanMeta) {
-	meta.value = next;
 	const ids = Array.isArray(next.ids) ? next.ids.map(String) : [];
-	unreferencedIds.value = ids;
+	const listed = ids.slice(0, LAYOUT_IDS_SAFE_MAX);
+	const truncated = Boolean(next.ids_truncated) || ids.length > listed.length || next.unreferenced_count > listed.length;
+
+	meta.value = {
+		...next,
+		ids: listed,
+		ids_truncated: truncated,
+	};
+	unreferencedIds.value = listed;
 	scannedOnce.value = true;
 	error.value = '';
 	resetPage();
