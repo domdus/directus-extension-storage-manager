@@ -61,9 +61,10 @@
 								>{{ storage.file_count.toLocaleString() }}
 								{{ storage.file_count === 1 ? 'file' : 'files' }}</span
 							>
-							<span class="tag"
-								>{{ (storage.folder_count ?? 0).toLocaleString() }}
-								{{ (storage.folder_count ?? 0) === 1 ? 'folder' : 'folders' }}</span
+							<span v-if="storage.folder_count == null" class="tag tag-muted">… folders</span>
+							<span v-else class="tag"
+								>{{ storage.folder_count.toLocaleString() }}
+								{{ storage.folder_count === 1 ? 'folder' : 'folders' }}</span
 							>
 							<span
 								v-if="storage.root"
@@ -317,6 +318,10 @@ onMounted(refresh);
 	text-overflow: ellipsis;
 	white-space: nowrap;
 	font-family: var(--theme--fonts--monospace--font-family, monospace);
+	color: var(--theme--foreground-subdued);
+}
+
+.meta .tag-muted {
 	color: var(--theme--foreground-subdued);
 }
 

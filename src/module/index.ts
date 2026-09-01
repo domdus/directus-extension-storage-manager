@@ -6,6 +6,7 @@ import FoldersView from './folders-view.vue';
 import SettingsView from './settings-view.vue';
 import UnreferencedView from './unreferenced-view.vue';
 import FileInterfacesView from './file-interfaces-view.vue';
+import RecycleView from './recycle-view.vue';
 
 export default defineModule({
 	id: 'storage-manager',
@@ -19,6 +20,10 @@ export default defineModule({
 		{
 			path: 'unreferenced',
 			component: UnreferencedView,
+		},
+		{
+			path: 'recycle',
+			component: RecycleView,
 		},
 		{
 			path: 'storage/:location',

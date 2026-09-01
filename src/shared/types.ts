@@ -20,8 +20,11 @@ export type StorageLocationInfo = StorageUsage & {
 	icon: string;
 	root: string | null;
 	bucket: string | null;
-	/** Physical storage folders discovered under this adapter. */
-	folder_count: number;
+	/**
+	 * Physical storage folders under this adapter (path prefixes from filename_disk).
+	 * `null` while the async folder-count request is still in flight.
+	 */
+	folder_count: number | null;
 	/** When true, new uploads and folder rename/delete follow the Directus folder tree on this adapter. */
 	mirror_directus_folders: boolean;
 };
@@ -147,6 +150,8 @@ export type StorageManagerSettings = {
 	name_mirror_claims?: Record<string, string>;
 	/** File lifecycle defaults (unreferenced scan + deselect / item-delete policies). */
 	lifecycle?: import('./lifecycle').StorageManagerLifecycleSettings;
+	/** Universal File Library recycle bin (opt-in). */
+	recycle?: import('./recycle').RecycleSettings;
 };
 
 export const STORAGE_MANAGER_FIELD = 'storage_manager';

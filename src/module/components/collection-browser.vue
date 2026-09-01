@@ -296,7 +296,7 @@ const canMigrateStorage = computed(
 );
 
 const detectLabel = computed(() =>
-	normalizedStoragePath.value ? 'Detect Files in this Folder' : `Detect Files on ${props.storage}`,
+	normalizedStoragePath.value ? 'Detect Files in This Folder' : `Detect Files On ${props.storage}`,
 );
 
 /** Nothing selected — show browse-level actions (detect / migrate whole scope). */
@@ -355,7 +355,7 @@ const moveSourceFolders = computed(() =>
 );
 
 const moveActionLabel = computed(() =>
-	moveIsWholeAdapter.value ? `Move all on ${props.storage}` : 'Move to Storage Folder',
+	moveIsWholeAdapter.value ? `Move All On ${props.storage}` : 'Move to Storage Folder',
 );
 
 const moveDestinationHint = computed(() => {
@@ -1421,7 +1421,7 @@ function bindLayout(layoutState: Record<string, any>) {
 					<v-info v-else title="No results" icon="search" center>
 						No files match your search or filters.
 						<template #append>
-							<v-button @click="clearFilters">Clear filters</v-button>
+							<v-button @click="clearFilters">Clear Filters</v-button>
 						</template>
 					</v-info>
 				</template>
@@ -1459,7 +1459,7 @@ function bindLayout(layoutState: Record<string, any>) {
 					<v-info title="No results" icon="search" center>
 						No transforms match your search.
 						<template #append>
-							<v-button @click="clearFilters">Clear search</v-button>
+							<v-button @click="clearFilters">Clear Search</v-button>
 						</template>
 					</v-info>
 				</template>
@@ -1502,7 +1502,7 @@ function bindLayout(layoutState: Record<string, any>) {
 							class="sidebar-btn sidebar-btn-primary"
 							@click="moveToDialogActive = true"
 						>
-							Move all on {{ storage }}
+							Move All On {{ storage }}
 						</v-button>
 						<v-button
 							v-if="canMaterializeFolder"

@@ -12,6 +12,9 @@ import type {
 const storages = ref<StorageLocationInfo[]>([]);
 const storagesLoading = ref(false);
 const storagesError = ref<string | null>(null);
+const folderCountsLoading = ref(false);
+
+let folderCountsAbort: AbortController | null = null;
 
 type MigratePayload = {
 	target_storage: string;
@@ -121,13 +124,50 @@ async function parseSseStream(
 export function useStorageManager() {
 	const api = useApi();
 
+	async function loadFolderCounts() {
+		folderCountsAbort?.abort();
+		const ac = new AbortController();
+		folderCountsAbort = ac;
+		folderCountsLoading.value = true;
+
+		try {
+			const res = await api.get('/storage-manager/storages/folder-counts', {
+				signal: ac.signal,
+			});
+			if (ac.signal.aborted) return;
+
+			const counts = (res.data?.data || {}) as Record<string, number>;
+			storages.value = storages.value.map((s) => ({
+				...s,
+				folder_count: Number(counts[s.location]) || 0,
+			}));
+		} catch (err: any) {
+			if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError' || ac.signal.aborted) return;
+			// Keep cards usable — show 0 if counts fail.
+			storages.value = storages.value.map((s) => ({
+				...s,
+				folder_count: s.folder_count ?? 0,
+			}));
+		} finally {
+			if (folderCountsAbort === ac) {
+				folderCountsLoading.value = false;
+				folderCountsAbort = null;
+			}
+		}
+	}
+
 	async function loadStorages(force = false) {
 		if (storages.value.length && !force) return storages.value;
 		storagesLoading.value = true;
 		storagesError.value = null;
 		try {
 			const res = await api.get('/storage-manager/storages');
-			storages.value = (res.data?.data || []) as StorageLocationInfo[];
+			storages.value = ((res.data?.data || []) as StorageLocationInfo[]).map((s) => ({
+				...s,
+				folder_count: s.folder_count ?? null,
+			}));
+			// Don't await — cards render with file counts first; folders fill in after.
+			void loadFolderCounts();
 			return storages.value;
 		} catch (err: any) {
 			storagesError.value = err?.response?.data?.errors?.[0]?.message || err?.message || 'Failed to load storages';
@@ -213,7 +253,9 @@ export function useStorageManager() {
 		storages,
 		storagesLoading,
 		storagesError,
+		folderCountsLoading,
 		loadStorages,
+		loadFolderCounts,
 		loadFiles,
 		loadFolders,
 		loadFolderPath,

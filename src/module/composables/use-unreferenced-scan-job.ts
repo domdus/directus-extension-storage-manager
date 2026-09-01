@@ -22,6 +22,8 @@ export type UnreferencedScanMeta = {
 	scan_text_fields: boolean;
 	elapsed_ms: number;
 	truncated: boolean;
+	/** Server-side scan session for paged `/unreferenced/items`. */
+	scan_id?: string;
 	ids_truncated?: boolean;
 	ids?: string[];
 };

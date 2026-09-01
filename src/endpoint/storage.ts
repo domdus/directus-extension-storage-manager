@@ -304,6 +304,21 @@ export async function diskListRelatedAssets(disk: StorageDisk, filenameDisk: str
 	return [...new Set([...canonical, ...colocated])];
 }
 
+/** Delete transform variants only — keep the original object. */
+export async function diskDeleteTransformsOnly(disk: StorageDisk, filenameDisk: string): Promise<number> {
+	const related = await diskListRelatedAssets(disk, filenameDisk);
+	let deleted = 0;
+	for (const name of related) {
+		try {
+			await diskDelete(disk, name);
+			deleted++;
+		} catch {
+			// best-effort
+		}
+	}
+	return deleted;
+}
+
 /** Delete primary object plus canonical and colocated transform variants. */
 export async function diskDeleteWithAssets(disk: StorageDisk, filenameDisk: string): Promise<void> {
 	const related = await diskListRelatedAssets(disk, filenameDisk);

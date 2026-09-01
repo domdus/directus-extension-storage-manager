@@ -12,7 +12,7 @@ import {
 	browseStorageFolders,
 	browseStorageFolderTree,
 	copyEmptyStorageFolders,
-	countStorageFolders,
+	aggregateFolderCountsFromDb,
 	createStorageFolder,
 	deleteStorageFolders,
 	ensureFileUnderPath,
@@ -33,7 +33,10 @@ import { materializeDryRun, materializeRun } from './materialize';
 import { checkForUpdates } from './update-check';
 import { countRootTransforms, deleteAllRootTransforms, listRootTransforms } from './root-transforms';
 import { registerUnreferencedRoutes } from './unreferenced-routes';
+import { registerRecycleRoutes } from './recycle-routes';
 import { LIFECYCLE_DEFAULTS, normalizeLifecycleSettings } from '../shared/lifecycle';
+import { normalizeRecycleSettings, RECYCLE_DEFAULTS } from '../shared/recycle';
+import { cleanupExtensionData } from './cleanup';
 
 type EndpointContext = {
 	services: Record<string, any>;
@@ -308,6 +311,7 @@ export default {
 		});
 
 		registerUnreferencedRoutes(router, context);
+		registerRecycleRoutes(router, context);
 
 		router.get('/storages', async (req: Request, res: Response, next: NextFunction) => {
 			try {
@@ -315,16 +319,16 @@ export default {
 
 				const locations = listConfiguredLocations(env);
 				const settings = await loadSettings(database);
+				// Folder counts scan every filename_disk — served separately so cards paint fast.
 				const usageByLocation = await aggregateFileUsageGrouped(database, locations);
 				const storages = await Promise.all(
 					locations.map(async (loc) => {
-						const folder_count = await countStorageFolders(database, loc, env);
 						const info = await buildStorageLocationInfo(
 							env,
 							database,
 							loc,
 							usageByLocation.get(loc),
-							folder_count,
+							null,
 						);
 						info.mirror_directus_folders = isDirectusFolderMirrorEnabled(getLocationSettings(settings, loc));
 						return info;
@@ -332,6 +336,23 @@ export default {
 				);
 
 				res.json({ data: storages });
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** Async folder counts for overview cards (does not block GET /storages). */
+		router.get('/storages/folder-counts', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+
+				const locations = listConfiguredLocations(env);
+				const folderCounts = await aggregateFolderCountsFromDb(database, locations);
+				const data: Record<string, number> = {};
+				for (const loc of locations) {
+					data[loc] = folderCounts.get(loc) || 0;
+				}
+				res.json({ data });
 			} catch (error) {
 				next(error);
 			}
@@ -359,8 +380,7 @@ export default {
 					return;
 				}
 
-				const folder_count = await countStorageFolders(database, location, env);
-				const info = await buildStorageLocationInfo(env, database, location, undefined, folder_count);
+				const info = await buildStorageLocationInfo(env, database, location, undefined, null);
 				const settings = await loadSettings(database);
 				info.mirror_directus_folders = isDirectusFolderMirrorEnabled(getLocationSettings(settings, location));
 				res.json({ data: info });
@@ -1560,6 +1580,7 @@ export default {
 					data: {
 						locations: settings.locations ?? {},
 						lifecycle: normalizeLifecycleSettings(settings.lifecycle ?? LIFECYCLE_DEFAULTS),
+						recycle: normalizeRecycleSettings(settings.recycle ?? RECYCLE_DEFAULTS),
 					},
 				});
 			} catch (error) {
@@ -1574,10 +1595,21 @@ export default {
 				const body = req.body as {
 					locations?: Record<string, Partial<StorageLocationSettings>>;
 					lifecycle?: Record<string, unknown>;
+					recycle?: Record<string, unknown>;
 				};
-				if (!body || (typeof body.locations !== 'object' && body.lifecycle === undefined)) {
+				if (
+					!body ||
+					(typeof body.locations !== 'object' &&
+						body.lifecycle === undefined &&
+						body.recycle === undefined)
+				) {
 					res.status(400).json({
-						errors: [{ message: 'Body must contain a "locations" object and/or "lifecycle".' }],
+						errors: [
+							{
+								message:
+									'Body must contain a "locations" object and/or "lifecycle" and/or "recycle".',
+							},
+						],
 					});
 					return;
 				}
@@ -1610,6 +1642,16 @@ export default {
 							? { ...normalizeLifecycleSettings(existing.lifecycle ?? LIFECYCLE_DEFAULTS), ...body.lifecycle }
 							: existing.lifecycle ?? LIFECYCLE_DEFAULTS,
 					),
+					// Enable/disable + folder create stay on /recycle/* — only retention merges here.
+					recycle: (() => {
+						const current = normalizeRecycleSettings(existing.recycle ?? RECYCLE_DEFAULTS);
+						if (body.recycle === undefined) return current;
+						const retention =
+							body.recycle.retention_days !== undefined
+								? body.recycle.retention_days
+								: current.retention_days;
+						return normalizeRecycleSettings({ ...current, retention_days: retention });
+					})(),
 				};
 				await database('directus_settings').update({ [STORAGE_MANAGER_FIELD]: JSON.stringify(next_settings) });
 				invalidateSettingsCache();
@@ -1618,8 +1660,30 @@ export default {
 					data: {
 						locations: next_settings.locations,
 						lifecycle: next_settings.lifecycle,
+						recycle: next_settings.recycle,
 					},
 				});
+			} catch (error) {
+				next(error);
+			}
+		});
+
+		/** POST /storage-manager/cleanup → remove extension-owned data before uninstall. */
+		router.post('/cleanup', async (req: Request, res: Response, next: NextFunction) => {
+			try {
+				if (!requireAdmin(req, res)) return;
+				const empty_recycle = Boolean((req.body as { empty_recycle?: boolean } | null)?.empty_recycle);
+				const result = await cleanupExtensionData(
+					{
+						database,
+						services,
+						getSchema,
+						accountability: (req as any).accountability ?? { admin: true },
+						logger,
+					},
+					{ empty_recycle },
+				);
+				res.json({ data: result });
 			} catch (error) {
 				next(error);
 			}

@@ -23,15 +23,17 @@ import {
 import { captureNestedFilesForDelete, deleteNestedFileObjects } from './nested-file-delete';
 import { mirrorFileAfterUpload } from './upload-mirror';
 import { registerFileLifecycleHooks } from './file-lifecycle';
+import { registerRecycleHooks } from './recycle';
 import { STORAGE_MANAGER_FIELD } from '../shared/types';
 
-export default defineHook(({ filter, action }, { database, env, services, getSchema, logger }) => {
+export default defineHook(({ filter, action, init }, { database, env, services, getSchema, logger }) => {
 	// ── Auto-create settings field on server start ─────────────────────────
 	action('server.start', async () => {
 		await ensureSettingsField(database, services, getSchema, logger);
 	});
 
 	registerFileLifecycleHooks({ filter, action }, { database, services, getSchema, logger });
+	registerRecycleHooks({ filter, action, init }, { database, logger });
 
 	// ── Invalidate settings cache whenever settings are saved ──────────────
 	filter('settings.update', (payload: Record<string, any>) => {

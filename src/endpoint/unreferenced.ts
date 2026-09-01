@@ -108,13 +108,6 @@ const TEXT_SCAN_TYPES = new Set(['text', 'json', 'csv']);
 const BATCH = 500;
 /** Chunk size when walking `directus_files` (keyset). */
 const FILE_CHUNK = 5_000;
-/**
- * Cap ids returned for Studio selection / paging in one scan batch.
- * The layout only puts the current page of ids into `id._in` (see unreferenced-view),
- * so this is no longer bound to querystring array limits.
- * Full `unreferenced_count` / `unreferenced_bytes` still cover every match.
- */
-const MAX_IDS_RETURNED = 500;
 
 function isSafeIdent(name: string): boolean {
 	return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name);
@@ -418,11 +411,22 @@ export async function collectUsedFileIds(
 
 function applyFileScopeFilters(
 	query: any,
-	options: { storage?: string | null; folder?: string | null; cutoff: string | null },
+	options: {
+		storage?: string | null;
+		folder?: string | null;
+		cutoff: string | null;
+		/** Skip File Library folders that hold extension-owned JSON (scan sessions). */
+		excludeFolderIds?: string[];
+	},
 ) {
 	if (options.storage) query.where('storage', String(options.storage));
 	if (options.folder !== undefined && options.folder !== null) {
 		query.where('folder', String(options.folder));
+	}
+	if (options.excludeFolderIds?.length) {
+		query.where((qb: any) => {
+			qb.whereNull('folder').orWhereNotIn('folder', options.excludeFolderIds);
+		});
 	}
 	if (options.cutoff) {
 		query.andWhere((qb: any) => {
@@ -502,7 +506,18 @@ export async function scanUnreferencedFiles(
 
 	const cutoff =
 		minAgeMinutes > 0 ? new Date(Date.now() - minAgeMinutes * 60_000).toISOString() : null;
-	const scope = { storage: options.storage, folder: options.folder, cutoff };
+
+	// Don't treat extension-owned File Library folders as unreferenced leftovers.
+	const { getUnreferencedScanFolderId } = await import('./unreferenced-scan-session');
+	const { getRecycleExcludeFolderIds } = await import('./recycle');
+	const scanFolderId = await getUnreferencedScanFolderId(database);
+	const recycleExclude = await getRecycleExcludeFolderIds(database);
+	const excludeFolderIds = [
+		...(scanFolderId ? [scanFolderId] : []),
+		...recycleExclude,
+	];
+
+	const scope = { storage: options.storage, folder: options.folder, cutoff, excludeFolderIds };
 
 	const countQuery = applyFileScopeFilters(database('directus_files').count({ total: '*' }), scope);
 	const countRow = await countQuery.first();
@@ -520,7 +535,6 @@ export async function scanUnreferencedFiles(
 	const unreferencedIds: string[] = [];
 	let unreferencedCount = 0;
 	let unreferencedBytes = 0;
-	let idsTruncated = false;
 	let scanned = 0;
 	let after: string | null = null;
 
@@ -539,8 +553,7 @@ export async function scanUnreferencedFiles(
 			if (!used.has(normalizeUuid(id))) {
 				unreferencedCount++;
 				unreferencedBytes += Number(row.filesize) || 0;
-				if (unreferencedIds.length < MAX_IDS_RETURNED) unreferencedIds.push(id);
-				else idsTruncated = true;
+				unreferencedIds.push(id);
 			}
 		}
 
@@ -609,8 +622,8 @@ export async function scanUnreferencedFiles(
 			min_age_minutes: minAgeMinutes,
 			scan_text_fields: scanTextFields,
 			elapsed_ms: Date.now() - started,
-			truncated: offset + limit < unreferencedIds.length || idsTruncated,
-			ids_truncated: idsTruncated,
+			truncated: false,
+			ids_truncated: false,
 			ids: unreferencedIds,
 		},
 	};

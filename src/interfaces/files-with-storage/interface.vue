@@ -523,9 +523,9 @@ const menuActive = computed(() => editModalActive.value || selectModalActive.val
 				</v-card-text>
 				<v-card-actions>
 					<v-button secondary :disabled="deselectDeleting" @click="deselectDialog = false">Cancel</v-button>
-					<v-button secondary :disabled="deselectDeleting" @click="confirmDeselectOnly">Deselect only</v-button>
+					<v-button secondary :disabled="deselectDeleting" @click="confirmDeselectOnly">Deselect Only</v-button>
 					<v-button kind="danger" :loading="deselectDeleting" @click="confirmDeselectAndDelete">
-						Delete if unused
+						Delete If Unused
 					</v-button>
 				</v-card-actions>
 			</v-card>

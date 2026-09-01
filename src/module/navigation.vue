@@ -48,6 +48,8 @@ const isSettings = computed(() => route.path.startsWith('/storage-manager/settin
 
 const isUnreferenced = computed(() => route.path.startsWith('/storage-manager/unreferenced'));
 
+const isRecycle = computed(() => route.path.startsWith('/storage-manager/recycle'));
+
 const isFileInterfaces = computed(() => route.path.startsWith('/storage-manager/file-interfaces'));
 
 watch([currentFolder, loading, folders], setOpenFolders, { immediate: true });
@@ -96,6 +98,10 @@ function goSettings() {
 
 function goUnreferenced() {
 	router.push('/storage-manager/unreferenced');
+}
+
+function goRecycle() {
+	router.push('/storage-manager/recycle');
 }
 
 function goFileInterfaces() {
@@ -170,6 +176,42 @@ function setOpenStorageFolders() {
 			</v-list-item-content>
 		</v-list-item>
 
+		<v-list-item clickable :active="isUnreferenced" @click="goUnreferenced">
+			<v-list-item-icon>
+				<v-icon name="link_off" />
+			</v-list-item-icon>
+			<v-list-item-content>
+				<v-text-overflow text="Unreferenced Files" />
+			</v-list-item-content>
+		</v-list-item>
+
+		<v-list-item clickable :active="isRecycle" @click="goRecycle">
+			<v-list-item-icon>
+				<v-icon name="recycling" />
+			</v-list-item-icon>
+			<v-list-item-content>
+				<v-text-overflow text="Recycle Bin" />
+			</v-list-item-content>
+		</v-list-item>
+
+		<v-list-item clickable :active="isFileInterfaces" @click="goFileInterfaces">
+			<v-list-item-icon>
+				<v-icon name="widgets" />
+			</v-list-item-icon>
+			<v-list-item-content>
+				<v-text-overflow text="File Interfaces" />
+			</v-list-item-content>
+		</v-list-item>
+
+		<v-list-item clickable :active="isSettings" @click="goSettings">
+			<v-list-item-icon>
+				<v-icon name="settings" />
+			</v-list-item-icon>
+			<v-list-item-content>
+				<v-text-overflow text="Settings" />
+			</v-list-item-content>
+		</v-list-item>
+
 		<v-divider />
 
 		<div class="section-label">Storage adapters</div>
@@ -228,33 +270,6 @@ function setOpenStorageFolders() {
 				</v-list-group>
 			</v-item-group>
 		</div>
-
-		<v-list-item clickable :active="isUnreferenced" @click="goUnreferenced">
-			<v-list-item-icon>
-				<v-icon name="link_off" />
-			</v-list-item-icon>
-			<v-list-item-content>
-				<v-text-overflow text="Unreferenced Files" />
-			</v-list-item-content>
-		</v-list-item>
-
-		<v-list-item clickable :active="isFileInterfaces" @click="goFileInterfaces">
-			<v-list-item-icon>
-				<v-icon name="widgets" />
-			</v-list-item-icon>
-			<v-list-item-content>
-				<v-text-overflow text="File Interfaces" />
-			</v-list-item-content>
-		</v-list-item>
-
-		<v-list-item clickable :active="isSettings" @click="goSettings">
-			<v-list-item-icon>
-				<v-icon name="settings" />
-			</v-list-item-icon>
-			<v-list-item-content>
-				<v-text-overflow text="Settings" />
-			</v-list-item-content>
-		</v-list-item>
 	</v-list>
 </template>
 

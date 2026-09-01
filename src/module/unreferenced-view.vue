@@ -1,410 +1,456 @@
 <template>
-	<component
-		:is="layoutWrapper"
-		ref="layoutRef"
-		v-slot="{ layoutState }"
-		v-model:selection="selection"
-		v-model:layout-options="layoutOptions"
-		v-model:layout-query="effectiveLayoutQuery"
-		:filter="layoutFilter"
-		:filter-user="filter"
-		:filter-system="systemFilter"
-		:search="search"
-		collection="directus_files"
-		:reset-preset="resetPreset"
-	>
-		<private-view title="Unreferenced Files" icon="link_off">
-			<template #headline>
-				<v-breadcrumb
-					:items="[
-						{ name: 'Storage Manager', to: '/storage-manager' },
-						{ name: 'Unreferenced Files', to: '/storage-manager/unreferenced' },
-					]"
-				/>
-			</template>
+	<private-view title="Unreferenced Files" icon="link_off">
+		<template #headline>
+			<v-breadcrumb
+				:items="[
+					{ name: 'Storage Manager', to: '/storage-manager' },
+					{ name: 'Unreferenced Files', to: '/storage-manager/unreferenced' },
+				]"
+			/>
+		</template>
 
-			<template #navigation>
-				<module-navigation />
-			</template>
+		<template #navigation>
+			<module-navigation />
+		</template>
 
-			<template v-if="scannedOnce" #actions:prepend>
-				<component :is="`layout-actions-${layout}`" v-bind="layoutState" />
-			</template>
+		<template v-if="scannedOnce" #actions:prepend>
+			<component :is="`layout-actions-${layout}`" v-bind="layoutState" />
+		</template>
 
-			<template #actions>
-				<search-input
-					v-if="scannedOnce"
-					v-model="search"
-					v-model:filter="filter"
-					collection="directus_files"
-				/>
-
-				<v-dialog
-					v-if="selection.length"
-					v-model="moveFolderDialogOpen"
-					@esc="moveFolderDialogOpen = false"
-					@apply="moveToDirectusFolder"
-				>
-					<template #activator="{ on }">
-						<header-action-button
-							v-tooltip.bottom="'Move to Directus Folder'"
-							icon="folder"
-							secondary
-							:disabled="busy"
-							@click="on"
-						/>
-					</template>
-					<v-card>
-						<v-card-title>Move to Directus Folder</v-card-title>
-						<v-card-text>
-							<p class="move-hint">
-								Assigns {{ selection.length }} selected file(s) to a Directus File Library folder
-								(virtual label only — storage path is unchanged).
-							</p>
-							<directus-folder-picker v-model="selectedDirectusFolder" />
-						</v-card-text>
-						<v-card-actions>
-							<v-button secondary @click="moveFolderDialogOpen = false">Cancel</v-button>
-							<v-button :loading="movingFolder" @click="moveToDirectusFolder">Move</v-button>
-						</v-card-actions>
-					</v-card>
-				</v-dialog>
-
-				<v-dialog
-					v-if="selection.length"
-					v-model="moveStorageDialogOpen"
-					@esc="moveStorageDialogOpen = false"
-					@apply="moveToStorageFolder"
-				>
-					<template #activator="{ on }">
-						<header-action-button
-							v-tooltip.bottom="'Move to Storage Folder'"
-							icon="folder_move"
-							secondary
-							:disabled="busy"
-							@click="on"
-						/>
-					</template>
-					<v-card>
-						<v-card-title>Move to Storage Folder</v-card-title>
-						<v-card-text>
-							<p class="move-hint">
-								Moves {{ selection.length }} selected file(s) onto a physical storage path. Thumbnails
-								move with the file when possible. Cross-storage moves use migrate.
-							</p>
-							<storage-target-picker v-model="selectedMoveTarget" />
-							<p v-if="moveDestinationHint" class="move-destination-hint">
-								{{ moveDestinationHint }}
-							</p>
-							<p class="move-destination-hint">
-								If another registered file already owns the destination path, the incoming file is
-								skipped and stays on the source.
-							</p>
-							<div class="move-dry-run">
-								<v-button
-									secondary
-									:loading="moveDryRunning"
-									:disabled="!selectedMoveTarget.location"
-									@click="runMoveDryRun"
-								>
-									Dry Run
-								</v-button>
-								<div v-if="moveDryRun" class="move-dry-result">
-									<p>
-										<strong>{{ moveDryRun.total_files.toLocaleString() }}</strong> files
-										<template v-if="moveDryRun.total_bytes">
-											· {{ formatBytes(moveDryRun.total_bytes) }}
-										</template>
-									</p>
-									<p v-if="moveDryRun.skipped" class="move-hint">
-										{{ moveDryRun.skipped.toLocaleString() }} already at destination — skipped
-									</p>
-								</div>
-							</div>
-						</v-card-text>
-						<v-card-actions>
-							<v-button secondary @click="moveStorageDialogOpen = false">Cancel</v-button>
-							<v-button
-								:disabled="!selectedMoveTarget.location"
-								:loading="movingStorage"
-								@click="moveToStorageFolder"
-							>
-								Move
-							</v-button>
-						</v-card-actions>
-					</v-card>
-				</v-dialog>
-
-				<header-action-button
-					v-if="selection.length"
-					v-tooltip.bottom="'Delete selected files'"
-					icon="delete"
-					secondary
-					:loading="deleting"
-					:disabled="busy"
-					@click="askDelete"
-				/>
-			</template>
-
-			<template #sidebar>
-				<layout-sidebar-detail v-if="scannedOnce" v-model="layout">
-					<component :is="`layout-options-${layout}`" v-bind="layoutState" />
-				</layout-sidebar-detail>
-
-				<sidebar-detail id="about" icon="info" title="About" :close="false">
-					<p class="sidebar-text">
-						Finds File Library entries that nothing still references. For automatic cleanup when fields are
-						cleared or items are deleted, open
-						<button type="button" class="text-link" @click="goFileInterfaces">File Interfaces</button>.
-					</p>
-				</sidebar-detail>
-			</template>
-
-			<div :class="pageClass">
-				<v-divider
-					class="section-divider"
-					large
-					:inline-title="false"
-					:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
-				>
-					<template #icon><v-icon name="link_off" /></template>
-					Find Unreferenced Files
-				</v-divider>
-
-				<p class="page-intro">
-					Dry-run scan of the File Library. Select files to move into a Directus folder, relocate on storage,
-					or delete (delete always re-checks references first).
-				</p>
-
-				<div class="scan-bar" aria-label="Scan Options">
-					<span class="scan-bar-title">Scan Options</span>
-
-					<div class="scan-bar-fields">
-						<div class="scan-bar-field scan-bar-field--age">
-							<label for="scan-min-age" class="scan-bar-label-row">
-								<span>Min Age (Minutes)</span>
-								<v-icon
-									v-tooltip.top="'Skip files uploaded within this many minutes. Avoids catching mid-upload or draft files that are not referenced yet.'"
-									name="help_outline"
-									small
-									class="scan-bar-info"
-								/>
-							</label>
-							<v-input
-								id="scan-min-age"
-								v-model="lifecycle.scan_min_age_minutes"
-								type="number"
-								:min="0"
-								:disabled="scanning"
-							/>
-						</div>
-
-						<div class="scan-bar-field scan-bar-field--storage">
-							<label for="scan-storage">Storage Filter</label>
-							<v-select
-								id="scan-storage"
-								v-model="storageFilter"
-								:items="storageFilterChoices"
-								:disabled="scanning"
-								show-deselect
-								placeholder="All Storages"
-							/>
-						</div>
-
-						<div class="scan-bar-field scan-bar-field--check">
-							<label class="scan-bar-label-row">
-								<span>Scan Text Fields</span>
-								<v-icon
-									v-tooltip.top="'Optional: also searches rich text, Markdown, JSON, code, multiline, list, tags, and text columns for /assets/ links and file UUIDs. Adds significant extra scan time on large content tables — turn off for a faster relations-only pass.'"
-									name="help_outline"
-									small
-									class="scan-bar-info"
-								/>
-							</label>
-							<div class="scan-bar-radios" role="radiogroup" aria-label="Scan Text Fields">
-								<v-radio
-									:model-value="lifecycle.scan_text_fields"
-									:value="true"
-									label="Yes"
-									:disabled="scanning"
-									@update:model-value="lifecycle.scan_text_fields = true"
-								/>
-								<v-radio
-									:model-value="lifecycle.scan_text_fields"
-									:value="false"
-									label="No"
-									:disabled="scanning"
-									@update:model-value="lifecycle.scan_text_fields = false"
-								/>
-							</div>
-						</div>
-					</div>
-
-					<div class="scan-bar-actions">
-						<v-button :loading="scanning" :disabled="busy" @click="runScan">
-							<v-icon name="radar" left />
-							Scan
-						</v-button>
-					</div>
-				</div>
-
-				<div v-if="meta" class="stats-grid">
-					<div class="stat">
-						<span class="stat-value">{{ meta.unreferenced_count.toLocaleString() }}</span>
-						<span class="stat-label">
-							Unreferenced
-							<v-icon
-								v-tooltip.top="meta?.ids_truncated
-									? 'Total unreferenced files found. The list below may show fewer — only listed files can be moved or deleted; scan again after clearing a batch.'
-									: 'File Library entries with no remaining references in relations or (optional) text fields, after Min Age / Storage Filter.'"
-								name="help_outline"
-								small
-								class="stat-info"
-							/>
-						</span>
-					</div>
-					<div class="stat">
-						<span class="stat-value">{{ formatBytes(meta.unreferenced_bytes ?? 0) }}</span>
-						<span class="stat-label">
-							Total Size
-							<v-icon
-								v-tooltip.top="'Sum of File Library filesize for all unreferenced files found by this scan (full total, not just the listed batch).'"
-								name="help_outline"
-								small
-								class="stat-info"
-							/>
-						</span>
-					</div>
-					<div class="stat">
-						<span class="stat-value">{{ (meta.collections_checked ?? 0).toLocaleString() }}</span>
-						<span class="stat-label">
-							Collections Checked
-							<v-icon
-								v-tooltip.top="'Unique collections that had at least one file relation or text field to inspect — not your total collection count. Includes system collections with file fields (e.g. avatar, logos).'"
-								name="help_outline"
-								small
-								class="stat-info"
-							/>
-						</span>
-					</div>
-					<div class="stat">
-						<span class="stat-value">{{ meta.relation_targets.toLocaleString() }}</span>
-						<span class="stat-label">
-							Relations Checked
-							<v-icon
-								v-tooltip.top="'Number of file/image fields that point at directus_files (one field = one). Includes system fields such as user avatars and project logos.'"
-								name="help_outline"
-								small
-								class="stat-info"
-							/>
-						</span>
-					</div>
-					<div class="stat">
-						<span class="stat-value">{{ meta.text_targets.toLocaleString() }}</span>
-						<span class="stat-label">
-							Text Fields Scanned
-							<v-icon
-								v-tooltip.top="'Rich text, Markdown, JSON, code, multiline, list, tags, and text columns checked for /assets/ links or file UUIDs. System Directus tables are excluded.'"
-								name="help_outline"
-								small
-								class="stat-info"
-							/>
-						</span>
-					</div>
-				</div>
-
-				<p v-if="meta?.ids_truncated" class="notice">
-					Showing {{ listedUnreferencedCount.toLocaleString() }} of
-					{{ meta.unreferenced_count.toLocaleString() }} unreferenced files. Only the files listed below can
-					be selected to move or delete — finish this batch, then scan again for the rest. Tip: use
-					<strong>Storage Filter</strong> to work through one storage at a time.
-				</p>
-
-				<p v-if="error" class="error">{{ error }}</p>
-			</div>
-
-			<div v-if="scanning && !scanDrawerOpen" class="loading-block">
-				<v-progress-circular indeterminate />
-				<span>Scan running in the background…</span>
-			</div>
-
-			<component
-				v-else-if="scannedOnce"
-				:is="`layout-${layout}`"
-				v-bind="bindLayout(layoutState)"
-			>
-				<template #no-results>
-					<v-info title="No results" icon="search" center>
-						No unreferenced files match your search or filters.
-						<template #append>
-							<v-button @click="clearFilters">Clear filters</v-button>
-						</template>
-					</v-info>
-				</template>
-
-				<template #no-items>
-					<v-info title="No unreferenced files" icon="link_off" center>
-						Nothing matched this scan (or leftovers are newer than the min age).
-						<template #append>
-							<v-button @click="runScan">Scan again</v-button>
-						</template>
-					</v-info>
-				</template>
-			</component>
-
-			<drawer-item
-				v-if="activeFileId"
+		<template #actions>
+			<search-input
+				v-if="scannedOnce"
+				v-model="search"
+				v-model:filter="filter"
 				collection="directus_files"
-				:primary-key="activeFileId"
-				:active="true"
-				@update:active="onFileDrawerActive"
 			/>
 
-			<v-dialog v-model="confirmOpen" @esc="confirmOpen = false">
+			<v-dialog
+				v-if="selection.length"
+				v-model="moveFolderDialogOpen"
+				@esc="moveFolderDialogOpen = false"
+				@apply="moveToDirectusFolder"
+			>
+				<template #activator="{ on }">
+					<header-action-button
+						v-tooltip.bottom="'Move to Directus Folder'"
+						icon="folder"
+						secondary
+						:disabled="busy"
+						@click="on"
+					/>
+				</template>
 				<v-card>
-					<v-card-title>Delete {{ selection.length }} file(s)?</v-card-title>
+					<v-card-title>Move to Directus Folder</v-card-title>
 					<v-card-text>
-						<p>
-							About to remove
-							<strong>{{ selection.length.toLocaleString() }}</strong>
-							file{{ selection.length === 1 ? '' : 's' }}
-							<template v-if="deleteSizeLoading"> · measuring size…</template>
-							<template v-else-if="deleteSelectionBytes != null">
-								· <strong>{{ formatBytes(deleteSelectionBytes) }}</strong>
-							</template>
-							from the File Library.
+						<p class="move-hint">
+							Assigns {{ selection.length }} selected file(s) to a Directus File Library folder
+							(virtual label only — storage path is unchanged).
 						</p>
-						<p>
-							Each file is re-checked for references before delete. Still-referenced files are skipped.
-							This cannot be undone.
-						</p>
+						<directus-folder-picker v-model="selectedDirectusFolder" />
 					</v-card-text>
 					<v-card-actions>
-						<v-button secondary @click="confirmOpen = false">Cancel</v-button>
-						<v-button kind="danger" :loading="deleting" @click="doDelete">Delete</v-button>
+						<v-button secondary @click="moveFolderDialogOpen = false">Cancel</v-button>
+						<v-button :loading="movingFolder" @click="moveToDirectusFolder">Move</v-button>
 					</v-card-actions>
 				</v-card>
 			</v-dialog>
 
-			<migrate-drawer
-				v-model="migrateDrawerOpen"
-				:storages="storages"
-				:source-storage="null"
-				selection-kind="files"
-				:file-ids="selection"
-				:folder-id="null"
-				:source-path="null"
-				:estimated-count="selection.length || undefined"
-				@done="onMigrated"
-			/>
+			<v-dialog
+				v-if="selection.length"
+				v-model="moveStorageDialogOpen"
+				@esc="moveStorageDialogOpen = false"
+				@apply="moveToStorageFolder"
+			>
+				<template #activator="{ on }">
+					<header-action-button
+						v-tooltip.bottom="'Move to Storage Folder'"
+						icon="folder_move"
+						secondary
+						:disabled="busy"
+						@click="on"
+					/>
+				</template>
+				<v-card>
+					<v-card-title>Move to Storage Folder</v-card-title>
+					<v-card-text>
+						<p class="move-hint">
+							Moves {{ selection.length }} selected file(s) onto a physical storage path. Thumbnails
+							move with the file when possible. Cross-storage moves use migrate.
+						</p>
+						<storage-target-picker v-model="selectedMoveTarget" />
+						<p v-if="moveDestinationHint" class="move-destination-hint">
+							{{ moveDestinationHint }}
+						</p>
+						<p class="move-destination-hint">
+							If another registered file already owns the destination path, the incoming file is
+							skipped and stays on the source.
+						</p>
+						<div class="move-dry-run">
+							<v-button
+								secondary
+								:loading="moveDryRunning"
+								:disabled="!selectedMoveTarget.location"
+								@click="runMoveDryRun"
+							>
+								Dry Run
+							</v-button>
+							<div v-if="moveDryRun" class="move-dry-result">
+								<p>
+									<strong>{{ moveDryRun.total_files.toLocaleString() }}</strong> files
+									<template v-if="moveDryRun.total_bytes">
+										· {{ formatBytes(moveDryRun.total_bytes) }}
+									</template>
+								</p>
+								<p v-if="moveDryRun.skipped" class="move-hint">
+									{{ moveDryRun.skipped.toLocaleString() }} already at destination — skipped
+								</p>
+							</div>
+						</div>
+					</v-card-text>
+					<v-card-actions>
+						<v-button secondary @click="moveStorageDialogOpen = false">Cancel</v-button>
+						<v-button
+							:disabled="!selectedMoveTarget.location"
+							:loading="movingStorage"
+							@click="moveToStorageFolder"
+						>
+							Move
+						</v-button>
+					</v-card-actions>
+				</v-card>
+			</v-dialog>
 
-			<unreferenced-scan-drawer v-model="scanDrawerOpen" @done="onScanDone" />
-		</private-view>
-	</component>
+			<header-action-button
+				v-if="selection.length && recycleEnabled"
+				v-tooltip.bottom="'Move to Recycle Bin'"
+				icon="recycling"
+				:loading="movingToRecycle"
+				:disabled="busy"
+				@click="askMoveToRecycle"
+			/>
+			<header-action-button
+				v-if="selection.length"
+				v-tooltip.bottom="recycleEnabled ? 'Delete Permanently' : 'Delete Selected Files'"
+				icon="delete"
+				secondary
+				:loading="deleting"
+				:disabled="busy"
+				@click="askDelete"
+			/>
+		</template>
+
+		<template #sidebar>
+			<layout-sidebar-detail v-if="scannedOnce" v-model="layout">
+				<component :is="`layout-options-${layout}`" v-bind="layoutState" />
+			</layout-sidebar-detail>
+
+			<sidebar-detail id="about" icon="info" title="About" :close="false">
+				<p class="sidebar-text">
+					Finds File Library entries that nothing still references. Prefer
+					<button type="button" class="text-link" @click="goRecycle">Recycle Bin</button>
+					for quarantine with retention; open
+					<button type="button" class="text-link" @click="goFileInterfaces">File Interfaces</button>
+					for automatic cleanup when fields are cleared or items are deleted.
+				</p>
+			</sidebar-detail>
+		</template>
+
+		<div :class="pageClass">
+			<v-divider
+				class="section-divider"
+				large
+				:inline-title="false"
+				:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
+			>
+				<template #icon><v-icon name="link_off" /></template>
+				Find Unreferenced Files
+			</v-divider>
+
+			<p class="page-intro">
+				Dry-run scan of the File Library. Select files to move into a Directus folder, relocate on storage,
+				or delete (delete always re-checks references first).
+			</p>
+
+			<div class="scan-bar" aria-label="Scan Options">
+				<span class="scan-bar-title">Scan Options</span>
+
+				<div class="scan-bar-fields">
+					<div class="scan-bar-field scan-bar-field--age">
+						<label for="scan-min-age" class="scan-bar-label-row">
+							<span>Min Age (Minutes)</span>
+							<v-icon
+								v-tooltip.top="'Skip files uploaded within this many minutes. Avoids catching mid-upload or draft files that are not referenced yet.'"
+								name="help_outline"
+								small
+								class="scan-bar-info"
+							/>
+						</label>
+						<v-input
+							id="scan-min-age"
+							v-model="lifecycle.scan_min_age_minutes"
+							type="number"
+							:min="0"
+							:disabled="scanning"
+						/>
+					</div>
+
+					<div class="scan-bar-field scan-bar-field--storage">
+						<label for="scan-storage">Storage Filter</label>
+						<v-select
+							id="scan-storage"
+							v-model="storageFilter"
+							:items="storageFilterChoices"
+							:disabled="scanning"
+							show-deselect
+							placeholder="All Storages"
+						/>
+					</div>
+
+					<div class="scan-bar-field scan-bar-field--check">
+						<label class="scan-bar-label-row">
+							<span>Scan Text Fields</span>
+							<v-icon
+								v-tooltip.top="'Optional: also searches rich text, Markdown, JSON, code, multiline, list, tags, and text columns for /assets/ links and file UUIDs. Adds significant extra scan time on large content tables — turn off for a faster relations-only pass.'"
+								name="help_outline"
+								small
+								class="scan-bar-info"
+							/>
+						</label>
+						<div class="scan-bar-radios" role="radiogroup" aria-label="Scan Text Fields">
+							<v-radio
+								:model-value="lifecycle.scan_text_fields"
+								:value="true"
+								label="Yes"
+								:disabled="scanning"
+								@update:model-value="lifecycle.scan_text_fields = true"
+							/>
+							<v-radio
+								:model-value="lifecycle.scan_text_fields"
+								:value="false"
+								label="No"
+								:disabled="scanning"
+								@update:model-value="lifecycle.scan_text_fields = false"
+							/>
+						</div>
+					</div>
+				</div>
+
+				<div class="scan-bar-actions">
+					<v-button :loading="scanning" :disabled="busy" @click="runScan">
+						<v-icon name="radar" left />
+						Scan
+					</v-button>
+				</div>
+			</div>
+
+			<div v-if="meta" class="stats-grid">
+				<div class="stat">
+					<span class="stat-value">{{ meta.unreferenced_count.toLocaleString() }}</span>
+					<span class="stat-label">
+						Unreferenced
+						<v-icon
+							v-tooltip.top="'File Library entries with no remaining references in relations or (optional) text fields, after Min Age / Storage Filter.'"
+							name="help_outline"
+							small
+							class="stat-info"
+						/>
+					</span>
+				</div>
+				<div class="stat">
+					<span class="stat-value">{{ formatBytes(meta.unreferenced_bytes ?? 0) }}</span>
+					<span class="stat-label">
+						Total Size
+						<v-icon
+							v-tooltip.top="'Sum of File Library filesize for all unreferenced files found by this scan.'"
+							name="help_outline"
+							small
+							class="stat-info"
+						/>
+					</span>
+				</div>
+				<div class="stat">
+					<span class="stat-value">{{ (meta.collections_checked ?? 0).toLocaleString() }}</span>
+					<span class="stat-label">
+						Collections Checked
+						<v-icon
+							v-tooltip.top="'Unique collections that had at least one file relation or text field to inspect — not your total collection count. Includes system collections with file fields (e.g. avatar, logos).'"
+							name="help_outline"
+							small
+							class="stat-info"
+						/>
+					</span>
+				</div>
+				<div class="stat">
+					<span class="stat-value">{{ meta.relation_targets.toLocaleString() }}</span>
+					<span class="stat-label">
+						Relations Checked
+						<v-icon
+							v-tooltip.top="'Number of file/image fields that point at directus_files (one field = one). Includes system fields such as user avatars and project logos.'"
+							name="help_outline"
+							small
+							class="stat-info"
+						/>
+					</span>
+				</div>
+				<div class="stat">
+					<span class="stat-value">{{ meta.text_targets.toLocaleString() }}</span>
+					<span class="stat-label">
+						Text Fields Scanned
+						<v-icon
+							v-tooltip.top="'Rich text, Markdown, JSON, code, multiline, list, tags, and text columns checked for /assets/ links or file UUIDs. System Directus tables are excluded.'"
+							name="help_outline"
+							small
+							class="stat-info"
+						/>
+					</span>
+				</div>
+			</div>
+
+			<p v-if="error" class="error">{{ error }}</p>
+
+			<v-notice v-if="restoredFromPrevious && scannedOnce && !sessionExpired" type="info" class="restored-notice">
+				Restored your previous scan. This is a snapshot — run Scan again if you need a fresh check.
+			</v-notice>
+		</div>
+
+		<div v-if="scanning && !scanDrawerOpen" class="loading-block">
+			<v-progress-circular indeterminate />
+			<span>Scan running in the background…</span>
+		</div>
+
+		<div v-else-if="sessionExpired" class="session-expired">
+			<v-notice type="warning">
+				This scan result is no longer available — it expired (JSON snapshots in
+				<strong>Unreferenced File Scans</strong> are kept for 24 hours), or the file was removed. Run Scan
+				again to refresh the list and continue browsing, filtering, or deleting.
+			</v-notice>
+			<div class="session-expired-actions">
+				<v-button @click="runScan">
+					<v-icon name="radar" left />
+					Scan Again
+				</v-button>
+			</div>
+		</div>
+
+		<!-- In-flow empty state: layout empty slots use absolute centering and overlap the scan bar on short viewports. -->
+		<div v-else-if="showEmptyNoItems" class="empty-state">
+			<v-info title="No Unreferenced Files" icon="link_off">
+				Nothing matched this scan (or leftovers are newer than the min age).
+				<template #append>
+					<v-button @click="runScan">Scan Again</v-button>
+				</template>
+			</v-info>
+		</div>
+
+		<component
+			v-else-if="scannedOnce"
+			ref="layoutRef"
+			:is="`layout-${layout}`"
+			v-bind="layoutState"
+			v-model:selection="selection"
+			@update:width="onLayoutWidth"
+			@update:limit="onLimitUpdate"
+			@update:fields="onFieldsUpdate"
+			@update:table-spacing="onTableSpacingUpdate"
+			@update:size="onSizeUpdate"
+			@update:sort="onSortUpdate"
+		>
+			<template #no-results>
+				<div class="empty-state empty-state--in-layout">
+					<v-info title="No Results" icon="search">
+						No unreferenced files match your search or filters.
+						<template #append>
+							<v-button @click="clearFilters">Clear Filters</v-button>
+						</template>
+					</v-info>
+				</div>
+			</template>
+
+			<template #no-items>
+				<div class="empty-state empty-state--in-layout">
+					<v-info title="No Unreferenced Files" icon="link_off">
+						Nothing matched this scan (or leftovers are newer than the min age).
+						<template #append>
+							<v-button @click="runScan">Scan Again</v-button>
+						</template>
+					</v-info>
+				</div>
+			</template>
+		</component>
+
+		<drawer-item
+			v-if="activeFileId"
+			collection="directus_files"
+			:primary-key="activeFileId"
+			:active="true"
+			@update:active="onFileDrawerActive"
+		/>
+
+		<v-dialog v-model="confirmOpen" @esc="confirmOpen = false">
+			<v-card>
+				<v-card-title>Delete {{ selection.length }} file(s) permanently?</v-card-title>
+				<v-card-text>
+					<p>
+						About to permanently remove
+						<strong>{{ selection.length.toLocaleString() }}</strong>
+						file{{ selection.length === 1 ? '' : 's' }}
+						<template v-if="deleteSizeLoading"> · measuring size…</template>
+						<template v-else-if="deleteSelectionBytes != null">
+							· <strong>{{ formatBytes(deleteSelectionBytes) }}</strong>
+						</template>
+						from the File Library.
+					</p>
+					<p>
+						Each file is re-checked for references before delete. Still-referenced files are skipped.
+						This cannot be undone.
+						<template v-if="recycleEnabled"> Prefer Move to Recycle when you want a retention window.</template>
+					</p>
+				</v-card-text>
+				<v-card-actions>
+					<v-button secondary @click="confirmOpen = false">Cancel</v-button>
+					<v-button kind="danger" :loading="deleting" @click="doDelete">Delete Permanently</v-button>
+				</v-card-actions>
+			</v-card>
+		</v-dialog>
+
+		<v-dialog v-model="recycleConfirmOpen" @esc="recycleConfirmOpen = false">
+			<v-card>
+				<v-card-title>Move {{ selection.length }} file(s) to Recycle?</v-card-title>
+				<v-card-text>
+					<p>
+						Moves
+						<strong>{{ selection.length.toLocaleString() }}</strong>
+						file{{ selection.length === 1 ? '' : 's' }}
+						into the Recycle Bin folder. Transforms are removed; originals stay until purge.
+						Non-admins cannot load their assets while they remain in Recycle.
+					</p>
+				</v-card-text>
+				<v-card-actions>
+					<v-button secondary @click="recycleConfirmOpen = false">Cancel</v-button>
+					<v-button :loading="movingToRecycle" @click="doMoveToRecycle">Move to Recycle</v-button>
+				</v-card-actions>
+			</v-card>
+		</v-dialog>
+
+		<migrate-drawer
+			v-model="migrateDrawerOpen"
+			:storages="storages"
+			:source-storage="null"
+			selection-kind="files"
+			:file-ids="selection"
+			:folder-id="null"
+			:source-path="null"
+			:estimated-count="selection.length || undefined"
+			@done="onMigrated"
+		/>
+
+		<unreferenced-scan-drawer v-model="scanDrawerOpen" @done="onScanDone" />
+	</private-view>
 </template>
 
+
 <script setup lang="ts">
-import { useLayout } from '@directus/composables';
 import { useApi } from '@directus/extensions-sdk';
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
@@ -419,31 +465,19 @@ import MigrateDrawer from './components/migrate-drawer.vue';
 import UnreferencedScanDrawer from './components/unreferenced-scan-drawer.vue';
 import { useFilesBrowserPreset } from './composables/use-files-browser-preset';
 import { useMigrateJob } from './composables/use-migrate-job';
+import { useUnreferencedFilesLayout } from './composables/use-unreferenced-files-layout';
 import { useUnreferencedScanJob } from './composables/use-unreferenced-scan-job';
 import type { UnreferencedScanMeta } from './composables/use-unreferenced-scan-job';
+import { useUnreferencedScanPersist } from './composables/use-unreferenced-scan-persist';
 import { usePageClass } from './composables/use-page-class';
 import { useStorageLocationBadges } from './composables/use-storage-location-badges';
 import { useStorageManager } from './composables/use-storage-manager';
-import { mergeFilters } from './utils/filters';
 import { formatBytes } from '../shared/format';
 import { LIFECYCLE_DEFAULTS, normalizeLifecycleSettings } from '../shared/lifecycle';
 
-type ScanMeta = UnreferencedScanMeta;
+type ScanMeta = UnreferencedScanMeta & { scan_id?: string };
 
-/** Sentinel UUID so the layout filter matches nothing before the first scan. */
-const EMPTY_ID = '00000000-0000-4000-8000-000000000000';
-
-/**
- * Max IDs allowed in one layout/files querystring `_in` filter.
- * 500 UUIDs as `filter[id][_in][n]=…` blows past common proxy URL limits (ERR_CONNECTION_RESET).
- * Paging is done by swapping this slice; the API request always uses page=1.
- */
-const LAYOUT_PAGE_IDS_MAX = 100;
-
-/** Max ids kept client-side for select / move / delete in one scan batch. */
-const LISTED_IDS_MAX = 500;
-
-/** Safe chunk size for ad-hoc `/files?filter[id][_in]=…` GETs. */
+/** Safe chunk size for ad-hoc `/files?filter=…` GETs. */
 const FILES_QUERY_IDS_CHUNK = 50;
 
 const api = useApi();
@@ -460,21 +494,25 @@ const {
 	clearLastResult: clearScanJobResult,
 } = useUnreferencedScanJob();
 
+const { save: savePersistedScan, clear: clearPersistedScan, load: loadPersistedScan } =
+	useUnreferencedScanPersist();
+
 const layoutRef = ref();
-const selection = ref<string[]>([]);
+const selection = ref<(string | number)[]>([]);
 const scanDrawerOpen = ref(false);
 const deleting = ref(false);
+const movingToRecycle = ref(false);
+const recycleEnabled = ref(false);
+const recycleConfirmOpen = ref(false);
 const scannedOnce = ref(false);
 const error = ref('');
 const confirmOpen = ref(false);
 const deleteSelectionBytes = ref<number | null>(null);
 const deleteSizeLoading = ref(false);
 const meta = ref<ScanMeta | null>(null);
-const unreferencedIds = ref<string[]>([]);
-/** Client-side page over `unreferencedIds` (API query always uses page 1 + sliced `_in`). */
-const listPage = ref(1);
+const scanId = ref<string | null>(null);
+const restoredFromPrevious = ref(false);
 
-/** Same as folders browser: `?file=` drives the item drawer. */
 const activeFileId = computed(() => {
 	const value = route.query.file;
 	return typeof value === 'string' && value.length > 0 ? value : null;
@@ -499,11 +537,10 @@ const busy = computed(
 	() =>
 		scanning.value ||
 		deleting.value ||
+		movingToRecycle.value ||
 		movingFolder.value ||
 		movingStorage.value,
 );
-
-const listedUnreferencedCount = computed(() => unreferencedIds.value.length);
 
 const moveDestinationHint = computed(() => {
 	const loc = selectedMoveTarget.value.location;
@@ -523,111 +560,14 @@ const storageFilterChoices = computed(() =>
 );
 
 const { layout, layoutOptions, layoutQuery, filter, search, resetPreset, resetPage } = useFilesBrowserPreset();
-const { layoutWrapper } = useLayout(layout);
 
 const showStorageLocationLabels = computed(() => scannedOnce.value);
 
-const defaultTabularFields = ['title', 'type', 'filesize', 'modified_on'];
-
-function clampLayoutLimit(raw: unknown): number {
-	const n = Number(raw);
-	if (!Number.isFinite(n) || n <= 0) return 25;
-	return Math.min(n, LAYOUT_PAGE_IDS_MAX);
-}
-
-/** Keep per-page ≤ LAYOUT_PAGE_IDS_MAX so `_in` URLs stay proxy-safe. */
-watch(
-	() => layoutQuery.value?.limit,
-	(lim) => {
-		const clamped = clampLayoutLimit(lim);
-		if (Number(lim) !== clamped) {
-			layoutQuery.value = { ...layoutQuery.value, limit: clamped, page: 1 };
-			listPage.value = 1;
-		}
-	},
-	{ immediate: true },
-);
-
-watch(
-	() => layoutQuery.value?.page,
-	(page) => {
-		// Paging is done by swapping `_in` IDs; the files request must always be page 1.
-		if (Number(page) !== 1) {
-			layoutQuery.value = { ...layoutQuery.value, page: 1 };
-		}
-	},
-	{ immediate: true },
-);
-
-const layoutLimit = computed(() => clampLayoutLimit(layoutQuery.value?.limit));
-
-const pageIds = computed(() => {
-	const ids = unreferencedIds.value;
-	if (!ids.length) return [] as string[];
-	const limit = layoutLimit.value;
-	const start = (Math.max(1, listPage.value) - 1) * limit;
-	return ids.slice(start, start + limit);
+/** Zero-result scan: keep empty state in document flow (not layout absolute center). */
+const showEmptyNoItems = computed(() => {
+	if (!scannedOnce.value || sessionExpired.value || scanning.value) return false;
+	return Number(meta.value?.unreferenced_count ?? 0) === 0;
 });
-
-const effectiveLayoutQuery = computed({
-	get() {
-		const query = { ...layoutQuery.value, page: 1, limit: layoutLimit.value };
-		if (!showStorageLocationLabels.value || layout.value !== 'tabular') {
-			return query;
-		}
-
-		const fields = [...(query.fields?.length ? query.fields : defaultTabularFields)];
-		if (!fields.includes('storage')) {
-			fields.push('storage');
-		}
-
-		return { ...query, fields };
-	},
-	set(value) {
-		const next = { ...(value || {}) };
-		const clamped = clampLayoutLimit(next.limit);
-		next.limit = clamped;
-		next.page = 1;
-		if (clamped !== clampLayoutLimit(layoutQuery.value?.limit)) {
-			listPage.value = 1;
-		}
-		layoutQuery.value = next;
-	},
-});
-
-useStorageLocationBadges({
-	enabled: showStorageLocationLabels,
-	layout,
-	layoutRef,
-	layoutQuery,
-});
-
-const systemFilter = computed(() => {
-	const ids = pageIds.value.length ? pageIds.value : [EMPTY_ID];
-	return { id: { _in: ids } };
-});
-
-const layoutFilter = computed(() => mergeFilters(filter.value, systemFilter.value));
-
-watch(listPage, () => {
-	refreshLayout().catch(() => undefined);
-});
-
-watch([filter, search], () => {
-	listPage.value = 1;
-	resetPage();
-});
-
-function clearFilters() {
-	filter.value = null;
-	search.value = null;
-	listPage.value = 1;
-	resetPage();
-}
-
-function goFileInterfaces() {
-	router.push('/storage-manager/file-interfaces');
-}
 
 function fileDetailPath(id: string | number) {
 	const query: Record<string, string | string[]> = { ...route.query, file: String(id) };
@@ -646,6 +586,67 @@ function fileDetailPath(id: string | number) {
 	return qs ? `${route.path}?${qs}` : route.path;
 }
 
+const {
+	layoutState,
+	refresh: refreshUnreferencedLayout,
+	sessionExpired,
+	totalCount: layoutTotalCount,
+	onLayoutWidth,
+	onLimitUpdate,
+	onFieldsUpdate,
+	onTableSpacingUpdate,
+	onSizeUpdate,
+	onSortUpdate,
+} = useUnreferencedFilesLayout({
+	scanId,
+	search,
+	filter,
+	layout,
+	layoutOptions,
+	layoutQuery,
+	selection,
+	resetPreset,
+	fileDetailPath,
+	routerPush: (path) => {
+		void router.push(path);
+	},
+	openInNewTab: (href) => {
+		window.open(href, '_blank');
+	},
+	resolveHref: (path) => router.resolve(path).href,
+});
+
+watch(sessionExpired, (expired) => {
+	if (!expired) return;
+	selection.value = [];
+	clearPersistedScan();
+});
+
+useStorageLocationBadges({
+	enabled: showStorageLocationLabels,
+	layout,
+	layoutRef,
+	layoutQuery,
+});
+
+watch([filter, search], () => {
+	resetPage();
+});
+
+function clearFilters() {
+	filter.value = null;
+	search.value = null;
+	resetPage();
+}
+
+function goFileInterfaces() {
+	router.push('/storage-manager/file-interfaces');
+}
+
+function goRecycle() {
+	router.push('/storage-manager/recycle');
+}
+
 function clearFileQuery() {
 	if (!('file' in route.query)) return;
 	const next = { ...route.query };
@@ -653,55 +654,28 @@ function clearFileQuery() {
 	router.replace({ path: route.path, query: next });
 }
 
-function bindLayout(layoutState: Record<string, any>) {
-	const pkField = layoutState.primaryKeyField?.field || 'id';
-	const total = unreferencedIds.value.length;
-
-	return {
-		...layoutState,
-		hasPrependContent: false,
-		/** Real page over the listed batch (fetch uses page=1 + sliced `_in`). */
-		page: listPage.value,
-		totalCount: scannedOnce.value ? total : layoutState.totalCount,
-		itemCount: scannedOnce.value ? total : layoutState.itemCount,
-		toPage(newPage: number) {
-			listPage.value = Math.max(1, Number(newPage) || 1);
-		},
-		getLinkForItem(item: Record<string, any>) {
-			const id = item?.[pkField];
-			if (id == null) return;
-			return fileDetailPath(id);
-		},
-		onRowClick({ item, event }: { item: Record<string, any>; event: MouseEvent }) {
-			const primaryKey = item?.[pkField];
-			if (primaryKey == null) return;
-
-			if (selection.value.length > 0) {
-				if (!selection.value.includes(primaryKey)) {
-					selection.value = selection.value.concat(primaryKey);
-				} else {
-					selection.value = selection.value.filter((key) => key !== primaryKey);
-				}
-				return;
-			}
-
-			const path = fileDetailPath(primaryKey);
-			if (event.ctrlKey || event.metaKey) window.open(router.resolve(path).href, '_blank');
-			else router.push(path);
-		},
-	};
-}
-
 function onFileDrawerActive(active: boolean) {
 	if (!active) {
 		clearFileQuery();
-		refreshLayout().catch(() => undefined);
+		refreshUnreferencedLayout().catch(() => undefined);
 	}
 }
 
 async function refreshLayout() {
 	await nextTick();
-	await layoutRef.value?.state?.refresh?.();
+	await refreshUnreferencedLayout();
+	if (meta.value && layoutTotalCount.value != null) {
+		meta.value = {
+			...meta.value,
+			unreferenced_count: layoutTotalCount.value,
+		};
+		if (scanId.value) {
+			savePersistedScan({
+				...(meta.value as ScanMeta),
+				scan_id: scanId.value,
+			});
+		}
+	}
 }
 
 async function patchLifecycle(partial: Record<string, unknown>) {
@@ -710,7 +684,6 @@ async function patchLifecycle(partial: Record<string, unknown>) {
 	});
 }
 
-/** Persist current scan options when Scan runs (no separate Save control). */
 async function persistScanOptions() {
 	await patchLifecycle({
 		scan_min_age_minutes: Number(lifecycle.scan_min_age_minutes) || 0,
@@ -719,19 +692,28 @@ async function persistScanOptions() {
 }
 
 async function applyScanMeta(next: ScanMeta) {
-	const ids = Array.isArray(next.ids) ? next.ids.map(String) : [];
-	const listed = ids.slice(0, LISTED_IDS_MAX);
-	const truncated = Boolean(next.ids_truncated) || ids.length > listed.length || next.unreferenced_count > listed.length;
+	const nextScanId = typeof next.scan_id === 'string' && next.scan_id ? next.scan_id : null;
+	if (!nextScanId) {
+		error.value = 'Scan finished without a session id — update Storage Manager and try again.';
+		return;
+	}
 
 	meta.value = {
 		...next,
-		ids: listed,
-		ids_truncated: truncated,
+		scan_id: nextScanId,
+		ids_truncated: false,
+		truncated: false,
 	};
-	unreferencedIds.value = listed;
-	listPage.value = 1;
+	scanId.value = nextScanId;
+	sessionExpired.value = false;
+	restoredFromPrevious.value = false;
 	scannedOnce.value = true;
 	error.value = '';
+	selection.value = [];
+	savePersistedScan({
+		...(meta.value as ScanMeta),
+		scan_id: nextScanId,
+	});
 	resetPage();
 	await refreshLayout();
 }
@@ -748,6 +730,7 @@ async function runScan() {
 	}
 	error.value = '';
 	selection.value = [];
+	restoredFromPrevious.value = false;
 	try {
 		await persistScanOptions().catch(() => undefined);
 		scanDrawerOpen.value = true;
@@ -769,9 +752,8 @@ watch(scanReopenNonce, () => {
 
 watch(scanJobResult, async (next) => {
 	if (!next || scanning.value) return;
-	// Apply background-completed results when returning to this page.
 	if (!scanDrawerOpen.value) {
-		await applyScanMeta(next);
+		await applyScanMeta(next as ScanMeta);
 		clearScanJobResult();
 	}
 });
@@ -808,6 +790,36 @@ async function askDelete() {
 	}
 }
 
+function askMoveToRecycle() {
+	if (!selection.value.length || !recycleEnabled.value) return;
+	recycleConfirmOpen.value = true;
+}
+
+async function doMoveToRecycle() {
+	if (!selection.value.length || movingToRecycle.value) return;
+	movingToRecycle.value = true;
+	try {
+		const res = await api.post('/storage-manager/recycle/move', {
+			file_ids: selection.value,
+			scan_id: scanId.value,
+		});
+		const moved = Number(res.data?.data?.moved) || 0;
+		selection.value = [];
+		recycleConfirmOpen.value = false;
+		await refreshLayout();
+		if (meta.value) {
+			meta.value = {
+				...meta.value,
+				unreferenced_count: Math.max(0, Number(meta.value.unreferenced_count) - moved),
+			};
+		}
+	} catch (err: any) {
+		window.alert(err?.response?.data?.errors?.[0]?.message || err?.message || 'Move to Recycle failed');
+	} finally {
+		movingToRecycle.value = false;
+	}
+}
+
 async function doDelete() {
 	if (!selection.value.length || deleting.value) return;
 	deleting.value = true;
@@ -815,50 +827,24 @@ async function doDelete() {
 		const res = await api.post('/storage-manager/unreferenced/delete', {
 			file_ids: selection.value,
 			scan_text_fields: Boolean(lifecycle.scan_text_fields),
+			scan_id: scanId.value,
 		});
-		const deleted = new Set(
-			((res.data?.data?.results || []) as Array<{ id: string; status: string }>)
-				.filter((r) => r.status === 'deleted')
-				.map((r) => String(r.id)),
-		);
-		unreferencedIds.value = unreferencedIds.value.filter((id) => !deleted.has(id));
-		if (meta.value) {
-			meta.value = {
-				...meta.value,
-				unreferenced_count: unreferencedIds.value.length,
-				ids: unreferencedIds.value,
-			};
-		}
 		selection.value = [];
 		confirmOpen.value = false;
 		await refreshLayout();
+		const deleted = Number(res.data?.data?.deleted) || 0;
+		if (meta.value) {
+			meta.value = {
+				...meta.value,
+				unreferenced_count: Math.max(0, Number(meta.value.unreferenced_count) - deleted),
+			};
+		}
 	} catch (err: any) {
-		error.value = err?.response?.data?.errors?.[0]?.message || err?.message || 'Delete failed';
-		confirmOpen.value = false;
+		window.alert(err?.response?.data?.errors?.[0]?.message || err?.message || 'Delete failed');
 	} finally {
 		deleting.value = false;
 	}
 }
-
-watch(moveFolderDialogOpen, (open) => {
-	if (open) selectedDirectusFolder.value = null;
-});
-
-watch(moveStorageDialogOpen, (open) => {
-	if (!open) return;
-	moveDryRun.value = null;
-	selectedMoveTarget.value = {
-		location: storages.value[0]?.location || '',
-		path: '',
-	};
-});
-
-watch(
-	() => [selectedMoveTarget.value.location, selectedMoveTarget.value.path] as const,
-	() => {
-		moveDryRun.value = null;
-	},
-);
 
 async function moveToDirectusFolder() {
 	if (!selection.value.length || movingFolder.value) return;
@@ -872,7 +858,7 @@ async function moveToDirectusFolder() {
 		selection.value = [];
 		await refreshLayout();
 	} catch (err: any) {
-		window.alert(err?.response?.data?.errors?.[0]?.message || err?.message || 'Move to folder failed');
+		window.alert(err?.response?.data?.errors?.[0]?.message || err?.message || 'Move failed');
 	} finally {
 		movingFolder.value = false;
 	}
@@ -989,8 +975,42 @@ onMounted(async () => {
 			Object.assign(lifecycle.native, normalized.native);
 			Object.assign(lifecycle.storage_manager, normalized.storage_manager);
 		}
+		recycleEnabled.value = Boolean(res.data?.data?.recycle?.enabled);
 	} catch {
 		/* defaults */
+	}
+
+	// Reopen last scan if the DB-backed server session is still alive.
+	if (!scanId.value && !scanning.value) {
+		const persisted = loadPersistedScan();
+		if (persisted?.scan_id) {
+			try {
+				const probe = await api.get(
+					`/storage-manager/unreferenced/sessions/${encodeURIComponent(persisted.scan_id)}`,
+				);
+				const data = probe.data?.data;
+				const serverMeta = data?.meta || {};
+				meta.value = {
+					...persisted,
+					...serverMeta,
+					scan_id: persisted.scan_id,
+					unreferenced_count:
+						Number(data?.id_count) ||
+						Number(serverMeta.unreferenced_count) ||
+						Number(persisted.unreferenced_count) ||
+						0,
+					ids_truncated: false,
+					truncated: false,
+				};
+				scanId.value = persisted.scan_id;
+				scannedOnce.value = true;
+				sessionExpired.value = false;
+				restoredFromPrevious.value = true;
+				await refreshLayout();
+			} catch {
+				clearPersistedScan();
+			}
+		}
 	}
 });
 </script>
@@ -1192,6 +1212,41 @@ onMounted(async () => {
 	gap: 0.75rem;
 	padding: 3rem var(--content-padding);
 	color: var(--theme--foreground-subdued);
+}
+
+.session-expired {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 1rem;
+	padding: 1.5rem var(--content-padding) 3rem;
+	max-inline-size: 40rem;
+}
+
+.session-expired-actions {
+	display: flex;
+	align-items: center;
+}
+
+.empty-state {
+	margin: 1.25rem var(--content-padding) 3rem;
+	max-inline-size: 36rem;
+}
+
+.empty-state--in-layout {
+	margin-block-start: 2rem;
+}
+
+.empty-state :deep(.v-info),
+.empty-state :deep(.v-info.center) {
+	position: static;
+	inset: auto;
+	transform: none;
+	text-align: start;
+}
+
+.restored-notice {
+	margin: 0 0 0.75rem;
 }
 
 .sidebar-text {

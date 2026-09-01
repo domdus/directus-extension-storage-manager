@@ -6,7 +6,7 @@ import {
 	siblingGroupKey,
 	type FolderRow,
 } from './folder-tree';
-import { loadSettings, saveSettings } from './settings';
+import { loadSettings, saveSettings, invalidateSettingsCache } from './settings';
 
 type Logger = { info: (msg: string) => void; warn: (msg: string) => void };
 
@@ -37,11 +37,16 @@ export async function ensureNameMirrorClaims(
 
 	const folders = await loadFolderRows(database);
 	const claims = bootstrapClaimsFromFolders(folders);
-	const next: StorageManagerSettings = {
-		...settings,
+	// Re-read immediately before write — folder create can race with recycle enable.
+	invalidateSettingsCache();
+	const latest = await loadSettings(database);
+	if (latest.name_mirror_claims !== undefined) {
+		return latest.name_mirror_claims;
+	}
+	await saveSettings(database, {
+		...latest,
 		name_mirror_claims: claims,
-	};
-	await saveSettings(database, next);
+	});
 	logger?.info(
 		`[storage-manager] Initialized name_mirror_claims (${Object.keys(claims).length} sibling groups)`,
 	);
@@ -49,6 +54,7 @@ export async function ensureNameMirrorClaims(
 }
 
 async function persistClaims(database: any, claims: Record<string, string>): Promise<void> {
+	invalidateSettingsCache();
 	const settings = await loadSettings(database);
 	await saveSettings(database, {
 		...settings,

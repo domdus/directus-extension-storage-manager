@@ -8,7 +8,7 @@ Move files between your Directus storages — local disk, S3, Google Cloud, Azur
 
 ![Storage Manager overview with local, local2, S3, and GCS adapters](https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_manager.png)
 
-Directus can use several storages at once, but it will not move existing files for you. Storage Manager does: browse each storage, upload, find files that are on disk but not in Directus, move files or whole folders, and find File Library entries that nothing uses anymore.
+Directus can use several storages at once, but it will not move existing files for you. Storage Manager does: browse each storage, upload, find files that are on disk but not in Directus, move files or whole folders, find File Library entries that nothing uses anymore, and optionally quarantine deletes in a Recycle Bin before permanent removal.
 
 When you open a storage from the overview, the left sidebar shows that storage’s folder tree. Folders load as you expand them, so large storages stay quick to navigate.
 
@@ -108,9 +108,26 @@ Set your scan options, then click **Scan**:
 
 After a scan you get a short summary and a list of matches (same cards/table layouts as elsewhere in Storage Manager). Select files and choose what to do:
 
+- **Move to Recycle** — when Recycle Bin is on, quarantine selected files instead of deleting immediately (primary action)
 - **Move to Directus Folder** — organize them in the File Library (virtual folders only)
 - **Move to Storage Folder** — relocate them on disk / cloud storage
-- **Delete** — remove them if they are still unused (each file is checked again before delete)
+- **Delete Permanently** — remove them if they are still unused (each file is checked again before delete)
+
+### Recycle Bin
+
+Open **Recycle Bin** from the left sidebar for an opt-in File Library quarantine. Files stay registered in Directus, but assets in the recycle folder are blocked from `/assets` for everyone, and the folder is hidden from normal File Library browse/search/picker (unless you open that folder on purpose).
+
+![Recycle Bin status, retention, purge actions, and scheduled purge Flow](https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_recycle_bin.png)
+
+Turn **On** to create `storage_manager_trashed_at` on `directus_files` and a recycle folder (default **`_Recycle`** — you can pick another File Library folder while Off). Unreferenced Files can move selections here; any other File Library file can be moved into this folder as well when permissions allow.
+
+While On you can:
+
+- Set **Retention (days)** — how long files stay before they are purge candidates
+- **Dry Run Purge** / **Purge Expired** — permanently delete files older than retention after re-checking that they are still unreferenced
+- **Scheduled Purge** — optionally create a daily Schedule Flow (`0 3 * * *`) that runs **Purge Recycle Bin**. Turning Recycle Bin off pauses a linked Flow; you can open or remove the Flow from this page
+
+Source of truth is the folder id. Renaming the folder in the File Library is fine.
 
 ### File Interfaces
 
@@ -134,13 +151,15 @@ Storage Manager fields can override these defaults per field in Data Model (incl
 
 ### Settings
 
-Check for updates, export or import your Mirror settings, or remove Storage Manager’s saved settings if you uninstall.
+Check for updates, export or import your Mirror settings, or **Remove Extension Data** before uninstall. Cleanup clears `directus_settings.storage_manager`, deletes the scheduled purge Flow (if any), and removes the **Unreferenced File Scans** snapshot folder. Recycle Bin files are left alone unless you opt in to empty them.
 
 ### Flows
 
 The **Storage Manager** Flow operation can move (or copy) **selected file IDs** in automations. Pick the target storage from a dropdown of configured locations, optionally assign files to a Directus File Library folder after a successful migrate, and pass an explicit `file_ids` array (for example from a trigger or previous step). It does not migrate an entire storage or folder at once. Copy leaves a leftover on the old storage — it will show up under Detect.
 
 **Scan Unreferenced Files** is a separate Flow operation that runs the same dry-run scan as the module (optional storage filter, min age, text-field scan). It returns `file_ids` (capped list), `unreferenced_count`, `unreferenced_bytes`, and full `meta` so you can chain into migrate or your own follow-up steps. It does not delete anything.
+
+**Purge Recycle Bin** permanently deletes expired Recycle Bin files (still-unreferenced only). Retention comes from Recycle Bin settings unless you override **Older Than (Days)**. Use **Dry Run** to count candidates. The Recycle Bin page can install a daily Schedule Flow that runs this operation.
 
 ## Getting started
 
@@ -152,8 +171,9 @@ The **Storage Manager** Flow operation can move (or copy) **selected file IDs** 
 6. At a storage root, open **Thumbnails** in the sidebar if you need to inspect or clear generated image copies.
 7. For collection fields that must land on a specific storage, use **File with Storage**, **Files with Storage**, or **Image with Storage** instead of the native file interfaces.
 8. Use **File Interfaces** to set default cleanup behaviour when editors clear a file field or delete an item (works for native file fields too).
-9. Use **Unreferenced Files** when you want to find leftover File Library entries, then move or delete them.
-10. Use **Dry Run**, then **Move**.
+9. Use **Unreferenced Files** when you want to find leftover File Library entries, then move them to Recycle, relocate, or delete permanently.
+10. Turn on **Recycle Bin** if you want a quarantine step before permanent delete, and optionally create **Scheduled Purge**.
+11. Use **Dry Run**, then **Move**.
 
 ## Installation
 

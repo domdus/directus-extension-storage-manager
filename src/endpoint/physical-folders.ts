@@ -401,17 +401,51 @@ export function countFolderNodes(nodes: StorageFolderNode[]): number {
 	return total;
 }
 
+/**
+ * Fast folder count for overview cards: unique path prefixes from `filename_disk`.
+ * Does **not** walk cloud disks or local trees (that made GET /storages hang for ~60s).
+ * Empty keep-only folders are omitted — acceptable for the overview metric.
+ */
 export async function countStorageFolders(
 	database: any,
 	location: string,
-	env: Record<string, unknown>,
+	_env?: Record<string, unknown>,
 ): Promise<number> {
 	try {
-		const paths = await listStorageFolderPaths(database, location, env);
-		return paths.length;
+		const paths = await collectAllFolderPathsFromDb(database, location);
+		return paths.size;
 	} catch {
 		return 0;
 	}
+}
+
+/** One `directus_files` scan for all locations (overview `/storages`). */
+export async function aggregateFolderCountsFromDb(
+	database: any,
+	locations: string[],
+): Promise<Map<string, number>> {
+	const pathSets = new Map<string, Set<string>>();
+	for (const loc of locations) pathSets.set(loc, new Set());
+	if (!locations.length) return new Map(locations.map((loc) => [loc, 0]));
+
+	const rows = await database('directus_files').whereIn('storage', locations).select('storage', 'filename_disk');
+
+	for (const row of rows || []) {
+		const storage = String(row.storage || '');
+		const set = pathSets.get(storage);
+		if (!set) continue;
+		const name = String(row.filename_disk || '').replace(/^[/\\]+/, '');
+		if (!name || isKeepMarker(name)) continue;
+		const dir = normalizeStoragePath(path.posix.dirname(name));
+		if (!dir || dir === '.') continue;
+		addPathPrefixes(set, dir);
+	}
+
+	const map = new Map<string, number>();
+	for (const loc of locations) {
+		map.set(loc, pathSets.get(loc)?.size || 0);
+	}
+	return map;
 }
 
 export async function listStorageFolderPaths(

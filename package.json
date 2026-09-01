@@ -1,8 +1,8 @@
 {
 	"name": "directus-extension-storage-manager",
-	"description": "Browse, upload, detect, materialize, move Directus files across storages, and find unreferenced File Library entries",
+	"description": "Browse, upload, detect, materialize, and move Directus files across storages; find unreferenced File Library entries; and quarantine deletes in a Recycle Bin",
 	"icon": "storage",
-	"version": "1.5.1",
+	"version": "1.6.0",
 	"license": "MIT",
 	"keywords": [
 		"directus",
@@ -19,7 +19,10 @@
 		"copy",
 		"orphans",
 		"unreferenced",
-		"lifecycle"
+		"lifecycle",
+		"recycle",
+		"recycle-bin",
+		"purge"
 	],
 	"type": "module",
 	"files": [
@@ -69,6 +72,14 @@
 				}
 			},
 			{
+				"type": "operation",
+				"name": "storage-manager-recycle-purge",
+				"source": {
+					"app": "src/operation/recycle-purge/app.ts",
+					"api": "src/operation/recycle-purge/api.ts"
+				}
+			},
+			{
 				"type": "hook",
 				"name": "storage-manager-hook",
 				"source": "src/hook/index.ts"
@@ -92,6 +103,11 @@
 				"type": "interface",
 				"name": "storage-manager-storage-location",
 				"source": "src/interfaces/storage-location-option/index.ts"
+			},
+			{
+				"type": "interface",
+				"name": "storage-manager-recycle-folder-info",
+				"source": "src/interfaces/recycle-folder-info/index.ts"
 			}
 		],
 		"host": ">=9.26.0 <13.0.0"

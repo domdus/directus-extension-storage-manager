@@ -152,7 +152,7 @@ export async function buildStorageLocationInfo(
 	database: any,
 	location: string,
 	precomputed?: { file_count: number; total_bytes: number },
-	folder_count = 0,
+	folder_count: number | null = null,
 ): Promise<StorageLocationInfo> {
 	const usage = await buildStorageUsage(env, database, location, precomputed);
 	const meta = getDriverMeta(usage.driver);

@@ -1,16 +1,29 @@
+import { normalizeLifecycleSettings } from '../shared/lifecycle';
+import { normalizeRecycleSettings } from '../shared/recycle';
 import {
 	STORAGE_MANAGER_FIELD,
 	STORAGE_MANAGER_LOCATION_DEFAULTS,
 	type StorageLocationSettings,
 	type StorageManagerSettings,
 } from '../shared/types';
-import { normalizeLifecycleSettings } from '../shared/lifecycle';
 
 /** In-process cache: invalidated whenever settings are saved. */
 let settingsCache: StorageManagerSettings | null = null;
 
+/** Cached recycle folder id (cleared with settings cache). */
+let recycleFolderIdCache: string | null | undefined = undefined;
+
 export function invalidateSettingsCache(): void {
 	settingsCache = null;
+	recycleFolderIdCache = undefined;
+}
+
+export function getCachedRecycleFolderId(): string | null | undefined {
+	return recycleFolderIdCache;
+}
+
+export function setCachedRecycleFolderId(id: string | null): void {
+	recycleFolderIdCache = id;
 }
 
 function normalizeNameMirrorClaims(raw: unknown): Record<string, string> {
@@ -54,6 +67,11 @@ export async function loadSettings(database: any): Promise<StorageManagerSetting
 		if (parsed && typeof parsed === 'object' && 'lifecycle' in parsed) {
 			result.lifecycle = normalizeLifecycleSettings(parsed.lifecycle);
 		}
+		if (parsed && typeof parsed === 'object' && 'recycle' in parsed) {
+			result.recycle = normalizeRecycleSettings(parsed.recycle);
+			// Only treat as active recycle when enabled — disable must clear exclusion/asset block.
+			recycleFolderIdCache = result.recycle.enabled ? result.recycle.folder_id : null;
+		}
 		settingsCache = result;
 		return settingsCache;
 	} catch (err) {
@@ -70,6 +88,8 @@ export async function saveSettings(database: any, settings: StorageManagerSettin
 		[STORAGE_MANAGER_FIELD]: JSON.stringify(settings),
 	});
 	settingsCache = settings;
+	const recycle = normalizeRecycleSettings(settings.recycle);
+	recycleFolderIdCache = recycle.enabled ? recycle.folder_id : null;
 }
 
 export function getLocationSettings(

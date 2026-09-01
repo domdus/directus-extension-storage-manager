@@ -2,14 +2,19 @@
 /**
  * Pick a Directus File Library (virtual) folder — updates `directus_files.folder` only.
  */
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, watch } from 'vue';
 import { useFolders } from '../composables/use-folders';
 import DirectusFolderPickerItem from './directus-folder-picker-item.vue';
 
-const props = defineProps<{
-	/** Selected folder id, or `null` for File Library root (unfiled). */
-	modelValue: string | null;
-}>();
+const props = withDefaults(
+	defineProps<{
+		/** Selected folder id, or `null` for File Library root (unfiled). */
+		modelValue: string | null;
+		/** When false, hide “Root (no folder)” — e.g. Recycle Bin must be a real folder. */
+		allowRoot?: boolean;
+	}>(),
+	{ allowRoot: true },
+);
 
 const emit = defineEmits<{
 	(e: 'update:modelValue', value: string | null): void;
@@ -55,7 +60,12 @@ onMounted(() => {
 	<div v-else class="folder-picker">
 		<v-list>
 			<v-item-group v-model="openFolders" scope="directus-folder-picker" multiple>
-				<v-list-item clickable :active="modelValue === null" @click="select(null)">
+				<v-list-item
+					v-if="allowRoot"
+					clickable
+					:active="modelValue === null"
+					@click="select(null)"
+				>
 					<v-list-item-icon>
 						<v-icon name="folder_open" />
 					</v-list-item-icon>

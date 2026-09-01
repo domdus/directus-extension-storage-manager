@@ -12,7 +12,7 @@
 			<sidebar-detail id="about" icon="info" title="About">
 				<p class="sidebar-text">
 					Export or import this extension’s JSON config, or remove the dedicated settings field before
-					uninstalling.
+					uninstalling. Recycle Bin lives under its own nav item.
 				</p>
 			</sidebar-detail>
 		</template>
@@ -31,7 +31,7 @@
 				Check npm for the latest published version and compare it with the installed extension version.
 			</p>
 			<div class="actions">
-				<v-button secondary :loading="checkingUpdates" @click="checkUpdates(true)">Check now</v-button>
+				<v-button secondary :loading="checkingUpdates" @click="checkUpdates(true)">Check Now</v-button>
 				<v-button
 					v-if="updateInfo?.has_update && marketplaceUrl"
 					secondary
@@ -53,7 +53,7 @@
 			</div>
 
 			<v-divider
-				class="section-divider"
+				class="section-divider add-margin-top"
 				large
 				:inline-title="false"
 				:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
@@ -92,14 +92,36 @@
 				:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
 			>
 				<template #icon><v-icon name="delete" /></template>
-				Remove extension data
+				Remove Extension Data
 			</v-divider>
 			<p class="explain">
-				Storage folder and sync settings live in a dedicated JSON field
-				<code>directus_settings.storage_manager</code>. Cleanup removes only that field and its value. If the
+				Use this before uninstalling. Cleanup removes:
+			</p>
+			<ul class="cleanup-list">
+				<li>
+					<code>directus_settings.storage_manager</code> (config JSON field)
+				</li>
+				<li>
+					Scheduled purge Flow
+					(<code>Storage Manager · Purge Recycle Bin</code>), if present
+				</li>
+				<li>
+					<code>Unreferenced File Scans</code> folder and its snapshot files
+				</li>
+			</ul>
+			<p class="explain">
+				The Recycle Bin folder and its files are left alone unless you opt in below. The
+				<code>storage_manager_trashed_at</code> field on <code>directus_files</code> is not removed. If the
 				extension stays installed, the next Directus restart may recreate an empty
 				<code>storage_manager</code> field.
 			</p>
+
+			<div class="side-field">
+				<v-checkbox v-model="emptyRecycle" :disabled="cleaning" label="Also Empty Recycle Bin" />
+				<p class="field-hint">
+					Permanently deletes all files in the Recycle folder and removes the folder. Cannot be undone.
+				</p>
+			</div>
 
 			<v-notice type="warning" class="notice">
 				Deleting extension data cannot be undone. Export first if you might need the config again.
@@ -108,8 +130,24 @@
 			<div v-if="result" class="result">
 				<v-notice type="success">
 					Cleanup finished.
-					<template v-if="result.clearedValue"> Value cleared.</template>
-					<template v-if="result.deletedField"> Field removed.</template>
+					<template v-if="result.cleared_value"> Value cleared.</template>
+					<template v-if="result.deleted_field"> Field removed.</template>
+					<template v-if="result.deleted_purge_flow"> Purge Flow deleted.</template>
+					<template v-if="result.deleted_scan_folder || result.deleted_scan_files">
+						· Scan snapshots removed
+						<template v-if="result.deleted_scan_files">
+							({{ result.deleted_scan_files.toLocaleString() }} file(s))
+						</template>.
+					</template>
+					<template v-if="result.emptied_recycle">
+						· Recycle emptied
+						<template v-if="result.deleted_recycle_files">
+							({{ result.deleted_recycle_files.toLocaleString() }} file(s))
+						</template>.
+					</template>
+				</v-notice>
+				<v-notice v-if="result.warnings?.length" type="warning" class="notice">
+					{{ result.warnings.join(' ') }}
 				</v-notice>
 			</div>
 
@@ -118,16 +156,22 @@
 			</div>
 
 			<v-button kind="danger" :loading="cleaning" :disabled="cleaning" @click="confirmOpen = true">
-				Delete storage_manager data
+				Delete Storage Manager Data
 			</v-button>
 		</div>
 
 		<v-dialog v-model="confirmOpen" @esc="confirmOpen = false">
 			<v-card>
-				<v-card-title>Delete storage_manager?</v-card-title>
+				<v-card-title>Remove Extension Data?</v-card-title>
 				<v-card-text>
-					This removes only <code>directus_settings.storage_manager</code> (the extension’s own JSON field).
-					All other project settings stay as they are.
+					<p>
+						This deletes the <code>storage_manager</code> settings field, the scheduled purge Flow (if any),
+						and the <code>Unreferenced File Scans</code> folder with its snapshot files.
+					</p>
+					<p v-if="emptyRecycle" class="dialog-danger">
+						Also permanently deletes every file in the Recycle Bin folder.
+					</p>
+					<p v-else class="dialog-note">Recycle Bin files are kept.</p>
 				</v-card-text>
 				<v-card-actions>
 					<v-button secondary @click="confirmOpen = false">Cancel</v-button>
@@ -141,7 +185,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
 import { useApi } from '@directus/extensions-sdk';
-import { useStorageSettingsAdmin } from './composables/use-storage-settings-admin';
+import {
+	useStorageSettingsAdmin,
+	type CleanupExtensionResult,
+} from './composables/use-storage-settings-admin';
 import { usePageClass } from './composables/use-page-class';
 import ModuleNavigation from './navigation.vue';
 import {
@@ -168,8 +215,9 @@ const {
 } = useStorageSettingsAdmin();
 
 const confirmOpen = ref(false);
+const emptyRecycle = ref(false);
 const errorMessage = ref<string | null>(null);
-const result = ref<{ clearedValue: boolean; deletedField: boolean } | null>(null);
+const result = ref<CleanupExtensionResult | null>(null);
 const importing = ref(false);
 const importMessage = ref<{ type: 'success' | 'danger'; text: string } | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -260,7 +308,7 @@ async function runCleanup() {
 	importMessage.value = null;
 
 	try {
-		result.value = await cleanupExtensionData();
+		result.value = await cleanupExtensionData({ empty_recycle: emptyRecycle.value });
 		confirmOpen.value = false;
 	} catch (error: any) {
 		errorMessage.value =
@@ -297,9 +345,44 @@ async function runCleanup() {
 
 .explain code,
 .sidebar-text code,
-.v-card-text code {
+.v-card-text code,
+.cleanup-list code {
 	font-family: var(--theme--fonts--monospace--font-family, monospace);
 	font-size: 0.9em;
+}
+
+.cleanup-list {
+	margin: 0 0 1rem;
+	padding-inline-start: 1.25rem;
+	line-height: 1.55;
+	color: var(--theme--foreground);
+}
+
+.cleanup-list li {
+	margin-block-end: 0.35rem;
+}
+
+.side-field {
+	margin: 0 0 1rem;
+	max-inline-size: 36rem;
+}
+
+.field-hint {
+	margin: 0.35rem 0 0;
+	font-size: 0.9rem;
+	line-height: 1.45;
+	color: var(--theme--foreground-subdued);
+}
+
+.dialog-danger {
+	margin: 0.75rem 0 0;
+	color: var(--theme--danger);
+	font-weight: 600;
+}
+
+.dialog-note {
+	margin: 0.75rem 0 0;
+	color: var(--theme--foreground-subdued);
 }
 
 .actions {
