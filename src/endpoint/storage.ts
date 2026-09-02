@@ -173,6 +173,28 @@ export async function diskStat(disk: StorageDisk, filename: string): Promise<{ s
 }
 
 export async function diskDelete(disk: StorageDisk, filename: string): Promise<void> {
+	const d = disk as any;
+	const key = String(filename || '');
+	const wantsSlash = key.endsWith('/');
+
+	/**
+	 * GCS/Azure “folders” are zero-byte objects whose names end in `/`.
+	 * Driver `fullPath()` / `path.join` strips that slash, so `disk.delete('My Folder/')`
+	 * misses the placeholder and the empty folder stays visible.
+	 */
+	if (wantsSlash && d?.bucket && typeof d.bucket.file === 'function') {
+		let objectName = typeof d.fullPath === 'function' ? String(d.fullPath(key) || '') : key;
+		if (objectName === '.') objectName = key;
+		if (!objectName.endsWith('/')) objectName += '/';
+		try {
+			await d.bucket.file(objectName).delete();
+		} catch (err: any) {
+			const code = Number(err?.code) || Number(err?.statusCode) || 0;
+			if (code !== 404) throw err;
+		}
+		return;
+	}
+
 	if (typeof disk.delete !== 'function') {
 		throw new Error('Storage disk does not support delete');
 	}
@@ -199,6 +221,9 @@ export async function* diskList(disk: StorageDisk, prefix = ''): AsyncGenerator<
 		let listPrefix =
 			typeof d.fullPath === 'function' ? String(d.fullPath(inputPrefix) || '') : inputPrefix;
 		if (listPrefix === '.') listPrefix = '';
+		if (inputPrefix.endsWith('/') && listPrefix && !listPrefix.endsWith('/')) {
+			listPrefix += '/';
+		}
 
 		let query: Record<string, unknown> = {
 			prefix: listPrefix,
@@ -224,6 +249,9 @@ export async function* diskList(disk: StorageDisk, prefix = ''): AsyncGenerator<
 		let listPrefix =
 			typeof d.fullPath === 'function' ? String(d.fullPath(inputPrefix) || '') : inputPrefix;
 		if (listPrefix === '.') listPrefix = '';
+		if (inputPrefix.endsWith('/') && listPrefix && !listPrefix.endsWith('/')) {
+			listPrefix += '/';
+		}
 
 		for await (const blob of d.containerClient.listBlobsFlat({ prefix: listPrefix })) {
 			const raw = String(blob?.name || '')

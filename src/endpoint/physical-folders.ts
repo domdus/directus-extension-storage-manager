@@ -12,6 +12,7 @@ import {
 	getStorageManager,
 } from './storage';
 import { getLocationDriver, getLocationRoot } from './usage';
+import { excludeRecycleFolderFromFilesQuery, getVirtualRecycleBrowseFolder, resolveRecycleFolderId } from './recycle';
 import { STORAGE_FOLDER_KEEP, type StorageBrowseFolder, type StorageFolderNode } from '../shared/types';
 
 export function normalizeStoragePath(raw: string | null | undefined): string {
@@ -165,6 +166,7 @@ async function collectImmediateFoldersFromDb(
 		let rows: Array<{ segment?: string }> = [];
 
 		const scoped = database('directus_files').where('storage', location).whereNotNull('filename_disk');
+		await excludeRecycleFolderFromFilesQuery(database, scoped);
 		if (prefix) {
 			scoped.where('filename_disk', 'like', `${prefix}%`);
 		} else {
@@ -254,19 +256,34 @@ export async function browseStorageFolders(
 	location: string,
 	parentPath: string,
 	env: Record<string, unknown>,
-): Promise<{ path: string; folders: StorageBrowseFolder[] }> {
+): Promise<{ path: string; folders: StorageBrowseFolder[]; virtual_recycle?: boolean; recycle_folder_id?: string }> {
 	const parent = normalizeStoragePath(parentPath);
+	const recycle = await getVirtualRecycleBrowseFolder(database, location);
+
+	if (recycle && parent === recycle.name) {
+		return { path: parent, folders: [], virtual_recycle: true, recycle_folder_id: recycle.id };
+	}
+
 	const names = new Set<string>();
 
 	for (const name of await collectImmediateFoldersFromDb(database, location, parent)) names.add(name);
 	for (const name of await collectImmediateFoldersFromDisk(location, parent, env)) names.add(name);
 	for (const name of await collectKeepFoldersFromDisk(location, parent, env)) names.add(name);
 
+	if (!parent && recycle) names.add(recycle.name);
+
 	const folders = Array.from(names)
-		.sort((a, b) => a.localeCompare(b))
+		.sort((a, b) => {
+			if (recycle) {
+				if (a === recycle.name && b !== recycle.name) return -1;
+				if (b === recycle.name && a !== recycle.name) return 1;
+			}
+			return a.localeCompare(b);
+		})
 		.map((name) => ({
 			name,
 			path: joinStoragePath(parent, name),
+			...( !parent && recycle && name === recycle.name ? { virtual: true } : {}),
 		}));
 
 	return { path: parent, folders };
@@ -281,7 +298,9 @@ function addPathPrefixes(paths: Set<string>, fullPath: string) {
 
 async function collectAllFolderPathsFromDb(database: any, location: string): Promise<Set<string>> {
 	const paths = new Set<string>();
-	const rows = await database('directus_files').select('filename_disk').where('storage', location);
+	const query = database('directus_files').select('filename_disk').where('storage', location);
+	await excludeRecycleFolderFromFilesQuery(database, query);
+	const rows = await query;
 
 	for (const row of rows) {
 		const name = String(row.filename_disk || '').replace(/^[/\\]+/, '');
@@ -428,7 +447,9 @@ export async function aggregateFolderCountsFromDb(
 	for (const loc of locations) pathSets.set(loc, new Set());
 	if (!locations.length) return new Map(locations.map((loc) => [loc, 0]));
 
-	const rows = await database('directus_files').whereIn('storage', locations).select('storage', 'filename_disk');
+	const query = database('directus_files').whereIn('storage', locations).select('storage', 'filename_disk');
+	await excludeRecycleFolderFromFilesQuery(database, query);
+	const rows = await query;
 
 	for (const row of rows || []) {
 		const storage = String(row.storage || '');
@@ -615,12 +636,110 @@ export async function createStorageFolder(
 	return { path: fullPath };
 }
 
+async function countRecycleFilesUnderPrefix(
+	database: any,
+	location: string,
+	folderPath: string,
+): Promise<number> {
+	const recycleId = await resolveRecycleFolderId(database);
+	if (!recycleId) return 0;
+	const row = await database('directus_files')
+		.where({ storage: location, folder: recycleId })
+		.whereRaw('filename_disk LIKE ?', [`${folderPath}/%`])
+		.count({ n: '*' })
+		.first();
+	return Number(row?.n ?? row?.['count(*)'] ?? 0) || 0;
+}
+
+/** `.keep` markers and cloud “directory” placeholders (`folder/` or `folder`). */
+function isCloudFolderShellKey(name: string, folderPath: string): boolean {
+	const key = String(name || '').replace(/^[/\\]+/, '');
+	const folder = normalizeStoragePath(folderPath);
+	if (!key || !folder) return false;
+
+	if (isKeepMarker(key)) {
+		const dir = normalizeStoragePath(path.posix.dirname(key));
+		return dir === folder || dir.startsWith(`${folder}/`);
+	}
+
+	const noSlash = key.replace(/\/+$/, '');
+	if (noSlash === folder) return true;
+	return key.startsWith(`${folder}/`) && key.endsWith('/');
+}
+
+async function collectKeysUnderFolder(disk: any, folderPath: string): Promise<string[]> {
+	const folder = normalizeStoragePath(folderPath);
+	const prefix = `${folder}/`;
+	const found = new Set<string>();
+
+	try {
+		for await (const filepath of diskList(disk, prefix)) {
+			const name = String(filepath || '').replace(/^[/\\]+/, '');
+			if (!name) continue;
+			const noSlash = name.replace(/\/+$/, '');
+			if (name === folder || noSlash === folder || name.startsWith(prefix)) found.add(name);
+		}
+	} catch {
+		// list unsupported — fall through to explicit exists checks
+	}
+
+	for (const extra of [folder, prefix, `${folder}/${STORAGE_FOLDER_KEEP}`]) {
+		try {
+			if (await diskExists(disk, extra)) found.add(extra);
+		} catch {
+			// ignore
+		}
+	}
+
+	return [...found];
+}
+
+/**
+ * Drop empty-folder markers on object storage so the path disappears from browse.
+ * Always tries the GCS/S3 directory placeholder (`folder/`) even when list/exists miss it.
+ * Leaves real (non-placeholder) objects in place.
+ */
+async function removeCloudFolderShell(
+	disk: any,
+	folderPath: string,
+	logger?: { info: (m: string) => void; warn: (m: string) => void },
+): Promise<{ empty: boolean; leftover: number }> {
+	const folder = normalizeStoragePath(folderPath);
+	const shells = [`${folder}/`, folder, `${folder}/${STORAGE_FOLDER_KEEP}`];
+
+	for (const key of shells) {
+		try {
+			await diskDelete(disk, key);
+		} catch {
+			// missing marker is fine
+		}
+	}
+
+	for (const key of await collectKeysUnderFolder(disk, folder)) {
+		if (!isCloudFolderShellKey(key, folder)) continue;
+		try {
+			await diskDelete(disk, key);
+		} catch (err: any) {
+			logger?.warn?.(
+				`[storage-manager] Could not remove folder marker “${key}”: ${err?.message || err}`,
+			);
+		}
+	}
+
+	const leftover = (await collectKeysUnderFolder(disk, folder)).filter(
+		(key) => !isCloudFolderShellKey(key, folder),
+	).length;
+
+	return { empty: leftover === 0, leftover };
+}
+
 /**
  * Delete storage folders (File Library–style).
- * - mode `move` (default): relocate registered files under the prefix up to the parent, then remove the folder.
- * - mode `delete`: permanently delete registered files under the prefix (DB + storage), then remove the folder.
- * Unregistered disk objects are not relocated — local dirs are force-removed; cloud leftovers are left alone
- * (only `.keep` markers under the prefix are cleaned up).
+ * - mode `move` (default): relocate **live** registered files under the prefix up to the parent, then remove the folder.
+ * - mode `delete`: permanently delete **live** registered files under the prefix (DB + storage), then remove the folder.
+ * Recycle Bin files that still use this path are left in place; the folder is not removed while any remain.
+ * Cloud empty folders are removed by deleting `.keep` markers and directory placeholders (`folder/`).
+ * Real unregistered objects are left in place — use Detect — and block folder removal.
  */
 export async function deleteStorageFolders(
 	database: any,
@@ -638,10 +757,12 @@ export async function deleteStorageFolders(
 	skipped: Array<{ path: string; error: string }>;
 	relocated: number;
 	files_deleted: number;
+	recycle_kept: Array<{ path: string; count: number }>;
 }> {
 	const mode = options?.mode === 'delete' ? 'delete' : 'move';
 	const deleted: string[] = [];
 	const skipped: Array<{ path: string; error: string }> = [];
+	const recycle_kept: Array<{ path: string; count: number }> = [];
 	let relocated = 0;
 	let filesDeleted = 0;
 	const driver = getLocationDriver(env, location);
@@ -660,10 +781,12 @@ export async function deleteStorageFolders(
 		try {
 			let deletedInFolder = 0;
 			if (mode === 'delete') {
-				const rows = await database('directus_files')
+				const query = database('directus_files')
 					.select('id', 'filename_disk')
 					.where('storage', location)
 					.whereRaw('filename_disk LIKE ?', [`${folderPath}/%`]);
+				await excludeRecycleFolderFromFilesQuery(database, query);
+				const rows = await query;
 
 				const realRows = rows.filter((r: any) => !isKeepMarker(String(r.filename_disk || '')));
 				const ids = realRows.map((r: any) => String(r.id));
@@ -693,6 +816,7 @@ export async function deleteStorageFolders(
 					folderPath,
 					parent,
 					logger,
+					{ skipRecycle: true },
 				);
 				relocated += moved;
 				if (failed > 0) {
@@ -704,29 +828,31 @@ export async function deleteStorageFolders(
 				}
 			}
 
+			const recycleCount = await countRecycleFilesUnderPrefix(database, location, folderPath);
+			if (recycleCount > 0) {
+				recycle_kept.push({ path: folderPath, count: recycleCount });
+				logger?.info(
+					`[storage-manager] Kept storage folder “${folderPath}” on ${location} — ${recycleCount} Recycle Bin file(s) still use this path`,
+				);
+				continue;
+			}
+
 			if (driver === 'local') {
 				const root = getLocationRoot(env, location);
 				if (!root) throw new Error('Missing local root');
 				const abs = resolveLocalAbsolute(root, folderPath);
 				await fs.rm(abs, { recursive: true, force: true });
 			} else {
-				// Drop keep markers that held the folder in the tree; leave unknown objects.
-				try {
-					for await (const filepath of diskList(disk, `${folderPath}/`)) {
-						const name = String(filepath || '').replace(/^[/\\]+/, '');
-						if (!name.startsWith(`${folderPath}/`)) continue;
-						if (!isKeepMarker(name)) continue;
-						try {
-							await diskDelete(disk, name);
-						} catch {
-							// best-effort
-						}
-					}
-				} catch {
-					const keepKey = `${folderPath}/${STORAGE_FOLDER_KEEP}`;
-					if (await diskExists(disk, keepKey)) {
-						await diskDelete(disk, keepKey);
-					}
+				const { empty, leftover } = await removeCloudFolderShell(disk, folderPath, logger);
+				if (!empty) {
+					skipped.push({
+						path: folderPath,
+						error:
+							leftover === 1
+								? 'This folder still has 1 file on storage that is not in the File Library. Use Detect to import or delete it first.'
+								: `This folder still has ${leftover} files on storage that are not in the File Library. Use Detect to import or delete them first.`,
+					});
+					continue;
 				}
 			}
 
@@ -741,7 +867,7 @@ export async function deleteStorageFolders(
 		}
 	}
 
-	return { deleted, skipped, relocated, files_deleted: filesDeleted };
+	return { deleted, skipped, relocated, files_deleted: filesDeleted, recycle_kept };
 }
 
 /**
@@ -1079,15 +1205,20 @@ export async function relocateFilesWithPrefixChange(
 	oldPrefix: string,
 	newPrefix: string,
 	logger?: { info: (m: string) => void; warn: (m: string) => void },
+	opts?: { skipRecycle?: boolean },
 ): Promise<{ moved: number; failed: number }> {
 	const fromPrefix = normalizeStoragePath(oldPrefix);
 	const toPrefix = normalizeStoragePath(newPrefix);
 	if (!fromPrefix || fromPrefix === toPrefix) return { moved: 0, failed: 0 };
 
-	const rows = await database('directus_files')
+	const query = database('directus_files')
 		.select('id', 'filename_disk', 'type')
 		.where('storage', location)
 		.whereRaw('filename_disk LIKE ?', [`${fromPrefix}/%`]);
+	if (opts?.skipRecycle) {
+		await excludeRecycleFolderFromFilesQuery(database, query);
+	}
+	const rows = await query;
 
 	if (!rows.length) return { moved: 0, failed: 0 };
 

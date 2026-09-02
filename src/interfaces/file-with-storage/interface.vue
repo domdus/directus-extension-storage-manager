@@ -105,6 +105,14 @@ async function deleteFileIfUnreferenced(fileId: string) {
 	}
 }
 
+async function moveFileToRecycleIfUnreferenced(fileId: string) {
+	try {
+		await api.post('/storage-manager/recycle/move-if-unreferenced', { file_ids: [fileId] });
+	} catch (error) {
+		unexpectedError(error);
+	}
+}
+
 async function onDeselectAction() {
 	const policy = effectiveDeselect.value;
 	const fileId = currentFileId();
@@ -118,6 +126,12 @@ async function onDeselectAction() {
 	if (policy === 'delete_if_unreferenced' && fileId) {
 		remove();
 		await deleteFileIfUnreferenced(fileId);
+		return;
+	}
+
+	if (policy === 'move_to_recycle' && fileId) {
+		remove();
+		await moveFileToRecycleIfUnreferenced(fileId);
 		return;
 	}
 

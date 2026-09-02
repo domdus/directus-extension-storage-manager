@@ -2,7 +2,7 @@
 /**
  * Port of Directus File Library collection.vue (v11.17.0), adapted for Storage Manager.
  * Uses host-registered layout-cards / layout-tabular via useLayout — same chrome as File Library.
- * Migration / Detect actions live in the right sidebar (and header shortcuts).
+ * Materialize, Detect, Move, and Restore live in dedicated right-sidebar panels.
  *
  * https://github.com/directus/directus/blob/v11.17.0/app/src/modules/files/routes/collection.vue
  */
@@ -25,6 +25,7 @@ import type { StorageTarget } from './storage-target-picker.vue';
 import DeleteStorageFolderDialog from './delete-storage-folder-dialog.vue';
 import UploadFilesDialog from './upload-files-dialog.vue';
 import MaterializeDrawer from './materialize-drawer.vue';
+import RecycleRestoreDrawer from './recycle-restore-drawer.vue';
 import ThumbnailsSidebarDetail from './thumbnails-sidebar-detail.vue';
 import { useDropUpload } from '../composables/use-drop-upload';
 import { useFilesBrowserPreset } from '../composables/use-files-browser-preset';
@@ -35,7 +36,7 @@ import { useStorageManager } from '../composables/use-storage-manager';
 import { useStorageFolderTrees } from '../composables/use-storage-folder-trees';
 import { useMigrateJob } from '../composables/use-migrate-job';
 import { usePageClass } from '../composables/use-page-class';
-import { getFolderFilter, getStorageFilter, mergeFilters } from '../utils/filters';
+import { getFolderFilter, getRecycleStorageFilter, getStorageFilter, mergeFilters } from '../utils/filters';
 import { DIRECTUS_FOLDERS_PAGE_INTRO, VIRTUAL_FOLDER_NOTE } from '../../shared/strategies';
 import { formatBytes } from '../../shared/format';
 import { storageManagerPath } from '../../shared/storage-path-url';
@@ -82,6 +83,20 @@ const moveDryRun = ref<{
 const confirmDelete = ref(false);
 const confirmDeleteFolders = ref(false);
 const deletingFiles = ref(false);
+const recycleEnabled = ref(false);
+const recycleFolderId = ref<string | null>(null);
+const recycleFolderName = ref<string | null>(null);
+const recycleFileCount = ref(0);
+const recycleConfirmOpen = ref(false);
+const recycleNoticeOpen = ref(false);
+const recycleNoticeTitle = ref('Recycle Bin');
+const recycleNoticeText = ref('');
+const movingToRecycle = ref(false);
+const recyclePendingIds = ref<string[]>([]);
+const virtualRecycleView = ref(false);
+const restoreDrawerOpen = ref(false);
+const restoreConfirmOpen = ref(false);
+const restoringSelection = ref(false);
 
 /** Distinct storage adapters used by files in the current Directus folder view. */
 const folderStorages = ref<string[]>([]);
@@ -139,12 +154,37 @@ const searchPlaceholder = computed(() =>
 	transformsOnlyView.value ? 'Search transforms…' : undefined,
 );
 
+const isInVirtualRecycle = computed(
+	() => props.mode === 'storage' && virtualRecycleView.value && Boolean(recycleFolderId.value),
+);
+
+const isInDirectusRecycleFolder = computed(
+	() => props.mode === 'folders' && Boolean(recycleFolderId.value) && props.folder === recycleFolderId.value,
+);
+
+const canRestoreAllRecycle = computed(() => isInVirtualRecycle.value || isInDirectusRecycleFolder.value);
+
+const restoreDrawerStorage = computed(() => (isInVirtualRecycle.value ? props.storage || null : null));
+
+const recycleRestoreCount = computed(() => {
+	if (isInVirtualRecycle.value) {
+		const n = Number(layoutRef.value?.state?.totalCount ?? layoutRef.value?.state?.itemCount ?? 0);
+		return Number.isFinite(n) ? n : 0;
+	}
+	return recycleFileCount.value;
+});
+
+const restoreAllDisabled = computed(() => recycleRestoreCount.value <= 0 && !search.value && !filter.value);
+
 const systemFilter = computed(() => {
 	if (props.mode === 'storage' && props.storage) {
+		if (isInVirtualRecycle.value && recycleFolderId.value) {
+			return getRecycleStorageFilter(props.storage, recycleFolderId.value);
+		}
 		return getStorageFilter(
 			props.storage,
 			normalizedStoragePath.value,
-			storageFolders.value.map((f) => f.name),
+			storageFolders.value.filter((f) => !f.virtual).map((f) => f.name),
 		);
 	}
 	return getFolderFilter(props.folder ?? null);
@@ -281,16 +321,26 @@ const multiStorageNotice = computed(() => {
 	return `This ${scope} has files on ${folderStorages.value.length} storages (${list}).`;
 });
 
-const canMaterializeFolder = computed(
-	() => props.mode === 'folders' && selection.value.length === 0 && folderSelection.value.length === 0,
+const showMaterializePanel = computed(
+	() => props.mode === 'folders' && !isInDirectusRecycleFolder.value,
 );
 
-/** Whole-adapter transfer in sidebar — storage root only, nothing selected. */
-const canMigrateStorage = computed(
+/** Header shortcut — hide when a selection is using the action bar. */
+const canMaterializeFolder = computed(
+	() => showMaterializePanel.value && selection.value.length === 0 && folderSelection.value.length === 0,
+);
+
+const showDetectPanel = computed(
+	() => props.mode === 'storage' && Boolean(props.storage) && !isInVirtualRecycle.value,
+);
+
+/** Whole-adapter move — storage root only, while nothing is selected (selection uses header Move). */
+const showMoveAllPanel = computed(
 	() =>
 		props.mode === 'storage' &&
 		Boolean(props.storage) &&
 		!normalizedStoragePath.value &&
+		!isInVirtualRecycle.value &&
 		selection.value.length === 0 &&
 		folderSelection.value.length === 0,
 );
@@ -299,15 +349,31 @@ const detectLabel = computed(() =>
 	normalizedStoragePath.value ? 'Detect Files in This Folder' : `Detect Files On ${props.storage}`,
 );
 
-/** Nothing selected — show browse-level actions (detect / migrate whole scope). */
-const nothingSelected = computed(
-	() => selection.value.length === 0 && folderSelection.value.length === 0,
+const detectDescription = computed(() =>
+	normalizedStoragePath.value
+		? 'Find files in this folder that are not in the File Library. Import them into Directus or delete the leftovers.'
+		: 'Find files on this storage that are not in the File Library. Import them into Directus or delete the leftovers.',
+);
+
+const materializeDescription =
+	'Create matching folders on storage from this virtual Directus tree. Files already stored are not moved.';
+
+const moveAllDescription = computed(
+	() =>
+		`Move every file and folder on ${props.storage} to another storage or path. Dry run is available before you start.`,
+);
+
+const restoreAllDescription = computed(() =>
+	isInVirtualRecycle.value
+		? `Restore every Recycle file on ${props.storage} to the File Library root. Storage keys stay put.`
+		: 'Restore every Recycle file to the File Library root. Storage keys stay put.',
 );
 
 /** Move selected files, selected physical folders, this Directus folder, or all files on a storage root. */
 const canMoveToStorageFolder = computed(
 	() =>
-		selection.value.length > 0 ||
+		!isInVirtualRecycle.value &&
+		(selection.value.length > 0 ||
 		(props.mode === 'storage' && folderSelection.value.length > 0) ||
 		(props.mode === 'storage' &&
 			Boolean(props.storage) &&
@@ -317,7 +383,7 @@ const canMoveToStorageFolder = computed(
 		(props.mode === 'folders' &&
 			selection.value.length === 0 &&
 			folderSelection.value.length === 0 &&
-			(folderMigrateCount.value ?? 0) > 0),
+			(folderMigrateCount.value ?? 0) > 0)),
 );
 
 const moveIsWholeAdapter = computed(
@@ -384,6 +450,33 @@ const canMigrateSelected = computed(
 const canDeleteSelection = computed(
 	() => selection.value.length > 0 || (props.mode === 'storage' && folderSelection.value.length > 0),
 );
+
+const recycleFolderSelectionCount = computed(() =>
+	props.mode === 'storage'
+		? folderSelection.value.filter((path) => !storageFolders.value.some((f) => f.virtual && f.path === path)).length
+		: folderSelection.value.length,
+);
+
+const canMoveToRecycle = computed(
+	() =>
+		recycleEnabled.value &&
+		!isInVirtualRecycle.value &&
+		!(props.mode === 'folders' && props.folder && props.folder === recycleFolderId.value) &&
+		(selection.value.length > 0 || recycleFolderSelectionCount.value > 0),
+);
+
+const canRestoreSelection = computed(
+	() => canRestoreAllRecycle.value && selection.value.length > 0,
+);
+
+const recycleConfirmTitle = computed(() => {
+	const files = selection.value.length;
+	const folders = recycleFolderSelectionCount.value;
+	if (folders && files) return 'Move selection to Recycle?';
+	if (folders === 1) return 'Recycle files in this folder?';
+	if (folders > 1) return `Recycle files in ${folders} folders?`;
+	return `Move ${files} file${files === 1 ? '' : 's'} to Recycle?`;
+});
 
 const migrateSelectedLabel = computed(() => {
 	if (folderSelection.value.length > 0 && selection.value.length === 0) {
@@ -630,6 +723,7 @@ onMounted(() => {
 	loadStorageFolders().catch(() => undefined);
 	refreshFolderMigrateCount().catch(() => undefined);
 	refreshFolderStorages().catch(() => undefined);
+	loadRecycleStatus().catch(() => undefined);
 });
 
 watch(
@@ -657,6 +751,7 @@ async function refresh() {
 async function loadStorageFolders() {
 	if (props.mode !== 'storage' || !props.storage) {
 		storageFolders.value = [];
+		virtualRecycleView.value = false;
 		return;
 	}
 	foldersLoading.value = true;
@@ -665,8 +760,13 @@ async function loadStorageFolders() {
 			params: { path: normalizedStoragePath.value || '' },
 		});
 		storageFolders.value = (res.data?.data?.folders || []) as StorageBrowseFolder[];
+		virtualRecycleView.value = Boolean(res.data?.data?.virtual_recycle);
+		if (res.data?.data?.recycle_folder_id) {
+			recycleFolderId.value = String(res.data.data.recycle_folder_id);
+		}
 	} catch {
 		storageFolders.value = [];
+		virtualRecycleView.value = false;
 	} finally {
 		foldersLoading.value = false;
 	}
@@ -704,6 +804,7 @@ async function resolveSelectedFileIds(): Promise<string[]> {
 				.replace(/\\/g, '/')
 				.replace(/^\/+|\/+$/g, '');
 			if (!prefix) continue;
+			if (storageFolders.value.some((f) => f.virtual && f.path === prefix)) continue;
 
 			try {
 				const res = await api.get('/files', {
@@ -723,6 +824,77 @@ async function resolveSelectedFileIds(): Promise<string[]> {
 				}
 			} catch {
 				// ignore per-folder failures; empty set handled by caller
+			}
+		}
+	}
+
+	return Array.from(ids);
+}
+
+function collectDescendantFolderIds(rootId: string): string[] {
+	const ids = [rootId];
+	if (!folders.value) return ids;
+	for (const folder of folders.value) {
+		if (folder.parent === rootId) ids.push(...collectDescendantFolderIds(folder.id));
+	}
+	return ids;
+}
+
+/** Selected files plus registered files under selected storage / Directus folders. */
+async function resolveRecycleFileIds(): Promise<string[]> {
+	const ids = new Set(selection.value.map(String));
+
+	if (props.mode === 'storage' && props.storage) {
+		for (const folderPath of folderSelection.value) {
+			const prefix = String(folderPath || '')
+				.replace(/\\/g, '/')
+				.replace(/^\/+|\/+$/g, '');
+			if (!prefix) continue;
+			if (storageFolders.value.some((f) => f.virtual && f.path === prefix)) continue;
+
+			try {
+				const res = await api.get('/files', {
+					params: {
+						limit: -1,
+						fields: ['id'],
+						filter: JSON.stringify({
+							_and: [
+								{ storage: { _eq: props.storage } },
+								{ filename_disk: { _starts_with: `${prefix}/` } },
+							],
+						}),
+					},
+				});
+				for (const row of res.data?.data || []) {
+					ids.add(String(row.id));
+				}
+			} catch {
+				// ignore per-folder failures
+			}
+		}
+	}
+
+	if (props.mode === 'folders' && folderSelection.value.length) {
+		const folderIds = new Set<string>();
+		for (const rawId of folderSelection.value) {
+			const id = String(rawId);
+			if (recycleFolderId.value && id === recycleFolderId.value) continue;
+			for (const fid of collectDescendantFolderIds(id)) folderIds.add(fid);
+		}
+		if (folderIds.size) {
+			try {
+				const res = await api.get('/files', {
+					params: {
+						limit: -1,
+						fields: ['id'],
+						filter: JSON.stringify({ folder: { _in: Array.from(folderIds) } }),
+					},
+				});
+				for (const row of res.data?.data || []) {
+					ids.add(String(row.id));
+				}
+			} catch {
+				// empty set handled by caller
 			}
 		}
 	}
@@ -830,6 +1002,7 @@ const uploadDialogOpen = ref(false);
 
 const { dragging, showDropEffect, uploading, uploadFiles } = useDropUpload({
 	preset: uploadPreset,
+	enabled: computed(() => !isInVirtualRecycle.value),
 	onDone: refresh,
 });
 
@@ -864,6 +1037,118 @@ watch(
 		moveDryRun.value = null;
 	},
 );
+
+async function loadRecycleStatus() {
+	try {
+		const res = await api.get('/storage-manager/recycle');
+		recycleEnabled.value = Boolean(res.data?.data?.enabled);
+		recycleFolderId.value = res.data?.data?.folder_id ? String(res.data.data.folder_id) : null;
+		recycleFolderName.value = res.data?.data?.folder_name ? String(res.data.data.folder_name) : null;
+		recycleFileCount.value = Number(res.data?.data?.file_count) || 0;
+	} catch {
+		recycleEnabled.value = false;
+		recycleFolderId.value = null;
+		recycleFolderName.value = null;
+		recycleFileCount.value = 0;
+	}
+}
+
+function showRecycleNotice(text: string, title = 'Recycle Bin') {
+	recycleNoticeTitle.value = title;
+	recycleNoticeText.value = text;
+	recycleNoticeOpen.value = true;
+}
+
+function cancelRecycleConfirm() {
+	recycleConfirmOpen.value = false;
+	recyclePendingIds.value = [];
+}
+
+async function askMoveToRecycle() {
+	if (!canMoveToRecycle.value || movingToRecycle.value) return;
+	movingToRecycle.value = true;
+	try {
+		const ids = await resolveRecycleFileIds();
+		if (!ids.length) {
+			showRecycleNotice(
+				recycleFolderSelectionCount.value
+					? 'Selected folder(s) contain no registered files to recycle.'
+					: 'No files selected.',
+			);
+			return;
+		}
+		recyclePendingIds.value = ids;
+		recycleConfirmOpen.value = true;
+	} catch (err: any) {
+		showRecycleNotice(
+			err?.response?.data?.errors?.[0]?.message || err?.message || 'Could not list files to recycle',
+			'Recycle Bin',
+		);
+	} finally {
+		movingToRecycle.value = false;
+	}
+}
+
+async function doMoveToRecycle() {
+	const ids = recyclePendingIds.value;
+	if (!ids.length || movingToRecycle.value) return;
+	movingToRecycle.value = true;
+	try {
+		for (let i = 0; i < ids.length; i += 1000) {
+			await api.post('/storage-manager/recycle/move', {
+				file_ids: ids.slice(i, i + 1000),
+			});
+		}
+		selection.value = [];
+		folderSelection.value = [];
+		recyclePendingIds.value = [];
+		recycleConfirmOpen.value = false;
+		await refresh();
+	} catch (err: any) {
+		showRecycleNotice(
+			err?.response?.data?.errors?.[0]?.message || err?.message || 'Move to Recycle failed',
+			'Recycle Bin',
+		);
+	} finally {
+		movingToRecycle.value = false;
+	}
+}
+
+async function onRestoreAllDone() {
+	restoreDrawerOpen.value = false;
+	selection.value = [];
+	await loadRecycleStatus();
+	await refresh();
+}
+
+function askRestoreSelection() {
+	if (!canRestoreSelection.value || restoringSelection.value) return;
+	restoreConfirmOpen.value = true;
+}
+
+async function doRestoreSelection() {
+	const ids = selection.value.map(String).filter(Boolean);
+	if (!ids.length || restoringSelection.value) return;
+	restoringSelection.value = true;
+	try {
+		for (let i = 0; i < ids.length; i += 1000) {
+			await api.post('/storage-manager/recycle/restore', {
+				file_ids: ids.slice(i, i + 1000),
+			});
+		}
+		selection.value = [];
+		restoreConfirmOpen.value = false;
+		await loadRecycleStatus();
+		await refresh();
+	} catch (err: any) {
+		showRecycleNotice(
+			err?.response?.data?.errors?.[0]?.message || err?.message || 'Restore failed',
+			'Restore',
+		);
+	} finally {
+		restoringSelection.value = false;
+	}
+}
 
 async function batchDeleteFiles() {
 	if (deletingFiles.value || !selection.value.length) return;
@@ -1113,7 +1398,7 @@ function onSelectAllFolders() {
 		return;
 	}
 	if (props.mode !== 'storage') return;
-	folderSelection.value = storageFolders.value.map((f) => f.path);
+	folderSelection.value = storageFolders.value.filter((f) => !f.virtual).map((f) => f.path);
 }
 
 async function onTransformsDeleted() {
@@ -1185,7 +1470,7 @@ function bindLayout(layoutState: Record<string, any>) {
 	>
 		<private-view
 			:title="title"
-			:icon="mode === 'storage' ? storageInfo?.icon || 'storage' : 'folder'"
+			:icon="isInVirtualRecycle ? 'recycling' : mode === 'storage' ? storageInfo?.icon || 'storage' : 'folder'"
 			:class="{ dragging }"
 		>
 			<template #headline>
@@ -1206,7 +1491,7 @@ function bindLayout(layoutState: Record<string, any>) {
 				/>
 
 				<add-storage-folder
-					v-if="mode === 'storage' && storage"
+					v-if="mode === 'storage' && storage && !isInVirtualRecycle"
 					:location="storage"
 					:parent-path="normalizedStoragePath"
 					@created="refresh"
@@ -1306,14 +1591,91 @@ function bindLayout(layoutState: Record<string, any>) {
 				</v-dialog>
 
 				<header-action-button
+					v-if="canMoveToRecycle"
+					v-tooltip.bottom="'Move to Recycle Bin'"
+					icon="recycling"
+					:loading="movingToRecycle"
+					:disabled="deletingFiles || movingToRecycle"
+					@click="askMoveToRecycle"
+				/>
+
+				<header-action-button
+					v-if="canRestoreSelection"
+					v-tooltip.bottom="'Restore to File Library'"
+					icon="undo"
+					:loading="restoringSelection"
+					:disabled="deletingFiles || restoringSelection"
+					@click="askRestoreSelection"
+				/>
+
+				<header-action-button
 					v-if="canDeleteSelection"
-					v-tooltip.bottom="'Delete'"
+					v-tooltip.bottom="recycleEnabled && selection.length ? 'Delete Permanently' : 'Delete'"
 					class="action-delete"
 					icon="delete"
 					secondary
-					:disabled="deletingFiles"
+					:disabled="deletingFiles || movingToRecycle || restoringSelection"
 					@click="openDelete"
 				/>
+
+				<v-dialog v-model="restoreConfirmOpen" @esc="restoreConfirmOpen = false">
+					<v-card>
+						<v-card-title>
+							Restore {{ selection.length }} file{{ selection.length === 1 ? '' : 's' }}?
+						</v-card-title>
+						<v-card-text>
+							<p>
+								Moves
+								<strong>{{ selection.length.toLocaleString() }}</strong>
+								file{{ selection.length === 1 ? '' : 's' }}
+								out of Recycle to the File Library root. Storage keys stay put.
+								<code>/assets</code> and pickers work again; thumbnails regenerate on the next request.
+							</p>
+						</v-card-text>
+						<v-card-actions>
+							<v-button secondary @click="restoreConfirmOpen = false">Cancel</v-button>
+							<v-button :loading="restoringSelection" @click="doRestoreSelection">Restore</v-button>
+						</v-card-actions>
+					</v-card>
+				</v-dialog>
+
+				<v-dialog v-model="recycleConfirmOpen" @esc="cancelRecycleConfirm">
+					<v-card>
+						<v-card-title>{{ recycleConfirmTitle }}</v-card-title>
+						<v-card-text>
+							<p>
+								Moves
+								<strong>{{ recyclePendingIds.length.toLocaleString() }}</strong>
+								registered file{{ recyclePendingIds.length === 1 ? '' : 's' }}
+								into the Recycle Bin.
+								<template v-if="recycleFolderSelectionCount">
+									Nested files in the selected folder{{
+										recycleFolderSelectionCount === 1 ? '' : 's'
+									}}
+									are included. The folder{{ recycleFolderSelectionCount === 1 ? ' itself is' : 's themselves are' }}
+									not deleted.
+								</template>
+								Transforms are removed; originals stay until purge.
+								<code>/assets</code> returns 404 and the files drop out of pickers until you move
+								them out of Recycle.
+							</p>
+						</v-card-text>
+						<v-card-actions>
+							<v-button secondary @click="cancelRecycleConfirm">Cancel</v-button>
+							<v-button :loading="movingToRecycle" @click="doMoveToRecycle">Move to Recycle</v-button>
+						</v-card-actions>
+					</v-card>
+				</v-dialog>
+
+				<v-dialog v-model="recycleNoticeOpen" @esc="recycleNoticeOpen = false">
+					<v-card>
+						<v-card-title>{{ recycleNoticeTitle }}</v-card-title>
+						<v-card-text>{{ recycleNoticeText }}</v-card-text>
+						<v-card-actions>
+							<v-button @click="recycleNoticeOpen = false">OK</v-button>
+						</v-card-actions>
+					</v-card>
+				</v-dialog>
 
 				<v-dialog v-model="confirmDelete" @esc="confirmDelete = false" @apply="batchDeleteFiles">
 					<v-card>
@@ -1344,6 +1706,7 @@ function bindLayout(layoutState: Record<string, any>) {
 				/>
 
 				<header-action-button
+					v-if="!isInVirtualRecycle"
 					v-tooltip.bottom="'Upload File'"
 					icon="add"
 					:loading="uploading"
@@ -1375,6 +1738,11 @@ function bindLayout(layoutState: Record<string, any>) {
 
 				<p class="page-intro">{{ DIRECTUS_FOLDERS_PAGE_INTRO }}</p>
 			</div>
+
+			<v-notice v-if="isInVirtualRecycle" type="info" class="multi-storage-notice">
+				Recycle Bin on this storage — files still sit at their original keys. Restore All in the sidebar
+				returns them to the File Library root.
+			</v-notice>
 
 			<v-notice v-if="multiStorageFolder" type="info" class="multi-storage-notice">
 				{{ multiStorageNotice }}
@@ -1412,7 +1780,10 @@ function bindLayout(layoutState: Record<string, any>) {
 				</template>
 
 				<template #no-results>
-					<v-info v-if="!filter && !search" title="No files" icon="folder" center>
+					<v-info v-if="isInVirtualRecycle && !filter && !search" title="No files" icon="recycling" center>
+						No recycled files on this storage.
+					</v-info>
+					<v-info v-else-if="!filter && !search" title="No files" icon="folder" center>
 						Drop files here to upload, or use the + button.
 						<template #append>
 							<v-button @click="openUploadDialog">Add File</v-button>
@@ -1427,7 +1798,10 @@ function bindLayout(layoutState: Record<string, any>) {
 				</template>
 
 				<template #no-items>
-					<v-info title="No files" icon="folder" center>
+					<v-info v-if="isInVirtualRecycle" title="No files" icon="recycling" center>
+						No recycled files on this storage.
+					</v-info>
+					<v-info v-else title="No files" icon="folder" center>
 						<template v-if="foldersLoading">Loading storage folders…</template>
 						<template v-else>
 							Drop files here to upload, or use the + button.
@@ -1485,32 +1859,52 @@ function bindLayout(layoutState: Record<string, any>) {
 				</layout-sidebar-detail>
 				<component :is="`layout-sidebar-${layout}`" v-bind="activeLayoutState(layoutState)" />
 
-				<sidebar-detail id="actions" icon="swap_horiz" title="Actions">
+				<sidebar-detail
+					v-if="showMaterializePanel"
+					id="materialize"
+					icon="account_tree"
+					title="Materialize"
+				>
+					<p class="sidebar-panel-copy">{{ materializeDescription }}</p>
 					<div class="sidebar-actions">
-						<v-button
-							v-if="mode === 'storage' && nothingSelected"
-							secondary
-							full-width
-							class="sidebar-btn"
-							@click="openDetect"
-						>
+						<v-button full-width class="sidebar-btn sidebar-btn-primary" @click="materializeOpen = true">
+							{{ folder ? 'Materialize This Folder' : 'Materialize Root Folders' }}
+						</v-button>
+					</div>
+				</sidebar-detail>
+
+				<sidebar-detail v-if="showDetectPanel" id="detect" icon="folder_off" title="Detect">
+					<p class="sidebar-panel-copy">{{ detectDescription }}</p>
+					<div class="sidebar-actions">
+						<v-button full-width class="sidebar-btn sidebar-btn-primary" @click="openDetect">
 							{{ detectLabel }}
 						</v-button>
+					</div>
+				</sidebar-detail>
+
+				<sidebar-detail v-if="showMoveAllPanel" id="move-all" icon="swap_horiz" title="Move">
+					<p class="sidebar-panel-copy">{{ moveAllDescription }}</p>
+					<div class="sidebar-actions">
 						<v-button
-							v-if="canMigrateStorage"
 							full-width
 							class="sidebar-btn sidebar-btn-primary"
 							@click="moveToDialogActive = true"
 						>
 							Move All On {{ storage }}
 						</v-button>
+					</div>
+				</sidebar-detail>
+
+				<sidebar-detail v-if="canRestoreAllRecycle" id="restore" icon="undo" title="Restore">
+					<p class="sidebar-panel-copy">{{ restoreAllDescription }}</p>
+					<div class="sidebar-actions">
 						<v-button
-							v-if="canMaterializeFolder"
 							full-width
-							class="sidebar-btn"
-							@click="materializeOpen = true"
+							class="sidebar-btn sidebar-btn-primary"
+							:disabled="restoreAllDisabled"
+							@click="restoreDrawerOpen = true"
 						>
-							{{ folder ? 'Materialize This Folder' : 'Materialize Root Folders' }}
+							{{ isInVirtualRecycle ? `Restore All On ${storage}` : 'Restore All' }}
 						</v-button>
 					</div>
 				</sidebar-detail>
@@ -1534,7 +1928,12 @@ function bindLayout(layoutState: Record<string, any>) {
 					<usage-bar :usage="storageInfo" compact plain />
 				</sidebar-detail>
 
-				<sidebar-detail v-else id="directus-folders-info" icon="info" title="Directus Folders">
+				<sidebar-detail
+					v-else-if="mode === 'folders' && !folder"
+					id="directus-folders-info"
+					icon="info"
+					title="Directus Folders"
+				>
 					<p class="sidebar-text sidebar-note">{{ VIRTUAL_FOLDER_NOTE }}</p>
 					<p class="sidebar-text">
 						Use Move to Storage Folder to relocate files onto a physical path. Materialize builds storage
@@ -1566,6 +1965,13 @@ function bindLayout(layoutState: Record<string, any>) {
 				:estimated-count="estimateCount"
 				:estimated-bytes="estimateBytes"
 				@done="onMigrated"
+			/>
+
+			<recycle-restore-drawer
+				v-model="restoreDrawerOpen"
+				:storage="restoreDrawerStorage"
+				:estimated-count="recycleRestoreCount"
+				@done="onRestoreAllDone"
 			/>
 
 			<import-orphans-drawer
@@ -1678,6 +2084,11 @@ function bindLayout(layoutState: Record<string, any>) {
 	border-color: var(--theme--background-accent);
 	opacity: 0.65;
 	cursor: not-allowed;
+}
+
+.sidebar-panel-copy {
+	margin: 0 0 10px;
+	line-height: 1.45;
 }
 
 .sidebar-text {

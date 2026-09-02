@@ -8,23 +8,31 @@
 		:key="folder.path"
 		class="card folder-card"
 		:class="{
-			selected: selection.includes(folder.path),
-			'select-mode': selectMode,
+			selected: !folder.virtual && selection.includes(folder.path),
+			'select-mode': selectMode && !folder.virtual,
+			virtual: folder.virtual,
 		}"
 		tabindex="0"
 		@click="onCardClick(folder)"
 		@keydown.self.enter.prevent="onCardClick(folder)"
 		@keydown.self.space.prevent="onCardClick(folder)"
-		@contextmenu.prevent="onContextMenu($event, folder.path)"
+		@contextmenu.prevent="onContextMenu($event, folder)"
 	>
-		<v-icon class="selector" :name="selectionIcon(folder.path)" clickable @click.stop="toggle(folder.path)" />
+		<v-icon
+			v-if="!folder.virtual"
+			class="selector"
+			:name="selectionIcon(folder.path)"
+			clickable
+			@click.stop="toggle(folder.path)"
+		/>
 		<div class="header">
 			<div class="selection-fade" />
-			<v-icon large name="folder" />
+			<v-icon large :name="folder.virtual ? 'recycling' : 'folder'" />
 		</div>
 		<div class="title">{{ folder.name }}</div>
 
 		<storage-folder-context-menu
+			v-if="!folder.virtual"
 			:ref="(el) => setMenuRef(folder.path, el)"
 			:location="location"
 			:path="folder.path"
@@ -79,6 +87,10 @@ function toggle(path: string) {
 }
 
 function onCardClick(folder: StorageBrowseFolder) {
+	if (folder.virtual) {
+		openFolder(folder.path);
+		return;
+	}
 	if (selectMode.value) {
 		toggle(folder.path);
 		return;
@@ -86,8 +98,9 @@ function onCardClick(folder: StorageBrowseFolder) {
 	openFolder(folder.path);
 }
 
-function onContextMenu(event: MouseEvent, path: string) {
-	menuRefs.value[path]?.open(event);
+function onContextMenu(event: MouseEvent, folder: StorageBrowseFolder) {
+	if (folder.virtual) return;
+	menuRefs.value[folder.path]?.open(event);
 }
 
 function onChanged() {
@@ -145,6 +158,10 @@ function onChanged() {
 .header .v-icon {
 	--v-icon-color: var(--theme--foreground-subdued);
 	position: absolute;
+}
+
+.card.virtual .header .v-icon {
+	--v-icon-color: var(--theme--primary);
 }
 
 .selection-fade {

@@ -14,11 +14,36 @@
 		</template>
 
 		<template #sidebar>
+			<sidebar-detail
+				v-if="recycle.enabled && recycle.file_count > 0"
+				id="restore"
+				icon="undo"
+				title="Restore"
+				:close="false"
+			>
+				<p class="sidebar-text sidebar-text--tight">
+					Restore every Recycle file to the File Library root. Storage keys stay put; thumbnails regenerate
+					on next request.
+				</p>
+				<div class="sidebar-actions">
+					<v-button
+						full-width
+						class="sidebar-btn sidebar-btn-primary"
+						:disabled="recycleBusy"
+						@click="restoreDrawerOpen = true"
+					>
+						Restore All
+					</v-button>
+				</div>
+			</sidebar-detail>
+
 			<sidebar-detail id="about" icon="info" title="About" :close="false">
 				<p class="sidebar-text">
-					Universal File Library quarantine. Files in the recycle folder stay registered, but non-admins
-					cannot load their assets. Optional daily cleanup installs a Schedule Flow — nothing is created
-					until you opt in.
+					Isolation is the point. Files stay in the File Library, but
+					<code>/assets</code> returns 404 (no thumbnails in collections or Studio), and they cannot be
+					found in file interfaces, search, or the picker unless you open this folder on purpose. If
+					still-used content was quarantined, the gap shows up immediately — move the file out of Recycle
+					to restore it.
 				</p>
 			</sidebar-detail>
 		</template>
@@ -35,11 +60,13 @@
 			</v-divider>
 
 			<p class="page-intro">
-				Opt-in quarantine for the File Library. Enabling creates
+				Opt-in quarantine for the File Library. Files in Recycle stay registered, but they are isolated:
+				<code>/assets</code> returns 404 (no thumbnails in collections or Studio), and they cannot be
+				searched or picked in file interfaces. If something still needed that file, the gap shows up
+				immediately — move it out of Recycle to restore access. Enabling creates
 				<code>storage_manager_trashed_at</code> on <code>directus_files</code> and a folder (default:
 				<code>_Recycle</code>). Unreferenced Files can move selections here instead of deleting immediately —
-				and any other File Library file can be moved into this folder as well (editors included, if their
-				permissions allow).
+				any other File Library file can be moved into this folder as well.
 			</p>
 
 			<div v-if="recycleLoading" class="result">
@@ -53,6 +80,7 @@
 							:model-value="recycle.enabled"
 							:value="false"
 							label="Off"
+							block
 							:disabled="recycleBusy"
 							@update:model-value="setEnabled(false)"
 						/>
@@ -60,6 +88,7 @@
 							:model-value="recycle.enabled"
 							:value="true"
 							label="On"
+							block
 							:disabled="recycleBusy"
 							@update:model-value="setEnabled(true)"
 						/>
@@ -84,12 +113,24 @@
 				<template v-if="!recycle.enabled">
 					<div class="side-field">
 						<label>Recycle Folder</label>
-						<v-select
-							v-model="recyclePickFolder"
-							:items="recycleFolderSelectItems"
-							:disabled="recycleBusy || foldersLoading"
-							:placeholder="defaultFolderName"
-						/>
+						<div class="folder-row">
+							<v-select
+								v-model="recyclePickFolder"
+								class="compact-control"
+								:items="recycleFolderSelectItems"
+								:disabled="recycleBusy || foldersLoading"
+								:placeholder="defaultFolderName"
+							/>
+							<v-button
+								v-tooltip.bottom="'Open folder in Storage Manager'"
+								secondary
+								icon
+								:disabled="!goToRecycleFolderId"
+								@click="goToRecycleFolder"
+							>
+								<v-icon name="folder_open" />
+							</v-button>
+						</div>
 						<p class="field-hint">
 							Defaults to <code>{{ defaultFolderName }}</code>. Or pick another File Library folder.
 						</p>
@@ -99,7 +140,23 @@
 				<template v-if="recycle.enabled">
 					<div class="side-field">
 						<label>Recycle Folder</label>
-						<v-select :model-value="recycle.folder_id" :items="recycleFolderChoices" disabled />
+						<div class="folder-row">
+							<v-select
+								class="compact-control"
+								:model-value="recycle.folder_id"
+								:items="recycleFolderChoices"
+								disabled
+							/>
+							<v-button
+								v-tooltip.bottom="'Open folder in Storage Manager'"
+								secondary
+								icon
+								:disabled="!goToRecycleFolderId"
+								@click="goToRecycleFolder"
+							>
+								<v-icon name="folder_open" />
+							</v-button>
+						</div>
 						<p class="field-hint">
 							Renaming in the File Library is fine; logic uses the folder id, not the display name.
 						</p>
@@ -110,6 +167,7 @@
 						<div class="retention-row">
 							<v-input
 								v-model="recycleRetention"
+								class="compact-control"
 								type="number"
 								:min="1"
 								:max="3650"
@@ -196,6 +254,7 @@
 					<label>Retention (days)</label>
 					<v-input
 						v-model="recycleRetention"
+						class="compact-control"
 						type="number"
 						:min="1"
 						:max="3650"
@@ -238,6 +297,12 @@
 				</v-card-actions>
 			</v-card>
 		</v-dialog>
+
+		<recycle-restore-drawer
+			v-model="restoreDrawerOpen"
+			:estimated-count="recycle.file_count"
+			@done="onRestoreAllDone"
+		/>
 	</private-view>
 </template>
 
@@ -246,6 +311,7 @@ import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useApi } from '@directus/extensions-sdk';
 import ModuleNavigation from './navigation.vue';
+import RecycleRestoreDrawer from './components/recycle-restore-drawer.vue';
 import { useFolders } from './composables/use-folders';
 import { usePageClass } from './composables/use-page-class';
 import {
@@ -296,6 +362,7 @@ const recyclePickFolder = ref<string>(CREATE_DEFAULT_FOLDER);
 const recycleMessage = ref<{ type: 'success' | 'danger'; text: string } | null>(null);
 const confirmPurgeOpen = ref(false);
 const confirmRemoveFlowOpen = ref(false);
+const restoreDrawerOpen = ref(false);
 const purging = ref(false);
 const purgeDryRunning = ref(false);
 const purgeFlowBusy = ref(false);
@@ -326,6 +393,27 @@ const rootRecycleFolderId = computed(() => {
 	);
 	return hit?.id ? String(hit.id) : null;
 });
+
+/** Resolvable folder id for “Open folder” (null while default folder does not exist yet). */
+const goToRecycleFolderId = computed(() => {
+	if (recycle.value.enabled) {
+		return recycle.value.folder_id || null;
+	}
+	const pick = recyclePickFolder.value;
+	if (pick && pick !== CREATE_DEFAULT_FOLDER) return pick;
+	return rootRecycleFolderId.value;
+});
+
+function goToRecycleFolder() {
+	const id = goToRecycleFolderId.value;
+	if (!id) return;
+	void router.push(`/storage-manager/folders/${id}`);
+}
+
+async function onRestoreAllDone() {
+	restoreDrawerOpen.value = false;
+	await loadRecycle();
+}
 
 const recycleFolderSelectItems = computed(() => {
 	const list = folders.value || [];
@@ -569,6 +657,45 @@ async function purgeRecycle(dryRun: boolean) {
 	line-height: 1.45;
 }
 
+.sidebar-text--tight {
+	margin-bottom: 0.85rem;
+}
+
+.sidebar-actions {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.sidebar-actions :deep(.sidebar-btn) {
+	display: flex;
+	width: 100%;
+}
+
+.sidebar-actions :deep(.sidebar-btn .button) {
+	width: 100%;
+	justify-content: center;
+	color: var(--theme--foreground);
+	background-color: var(--theme--background-accent);
+	border-color: var(--theme--background-accent);
+}
+
+.sidebar-actions :deep(.sidebar-btn .button:hover:not(:disabled)) {
+	background-color: var(--theme--background-normal);
+	border-color: var(--theme--background-normal);
+}
+
+.sidebar-actions :deep(.sidebar-btn-primary .button:not(:disabled)) {
+	color: var(--foreground-inverted, var(--theme--primary-foreground, #fff));
+	background-color: var(--theme--primary);
+	border-color: var(--theme--primary);
+}
+
+.sidebar-actions :deep(.sidebar-btn-primary .button:hover:not(:disabled)) {
+	background-color: var(--theme--primary-accent);
+	border-color: var(--theme--primary-accent);
+}
+
 .page-intro code,
 .sidebar-text code,
 .field-hint code,
@@ -612,17 +739,25 @@ async function purgeRecycle(dryRun: boolean) {
 }
 
 .field-hint {
-	margin: 0.35rem 0 0;
-	font-size: 0.9rem;
-	line-height: 1.45;
-	color: var(--theme--foreground-subdued);
+	margin: 4px 0 0;
+	font-size: 12px;
+	line-height: 1.4;
+	color: var(--theme--form--field--note--foreground, var(--theme--foreground-subdued));
 }
 
 .status-radios {
 	display: flex;
+	flex-direction: row;
 	flex-wrap: wrap;
-	gap: 1rem 1.25rem;
-	align-items: center;
+	gap: 8px;
+	max-inline-size: 18rem;
+}
+
+.status-radios :deep(.v-radio.block) {
+	inline-size: auto;
+	flex: 1 1 0;
+	min-inline-size: 5.5rem;
+	max-inline-size: 8.5rem;
 }
 
 .retention-row {
@@ -632,11 +767,18 @@ async function purgeRecycle(dryRun: boolean) {
 	gap: 8px;
 }
 
-.retention-row :deep(.v-input),
-.retention-row :deep(.v-select) {
-	flex: 1 1 8rem;
-	min-inline-size: 6rem;
-	max-inline-size: 18rem;
+.folder-row {
+	display: flex;
+	flex-wrap: nowrap;
+	align-items: center;
+	gap: 8px;
+}
+
+:deep(.compact-control) {
+	flex: none;
+	inline-size: 7rem !important;
+	max-inline-size: 7rem !important;
+	width: 7rem !important;
 }
 
 .scheduled-purge-divider {
@@ -649,5 +791,9 @@ async function purgeRecycle(dryRun: boolean) {
 	border: 1px solid var(--theme--border-color-subdued);
 	border-radius: var(--theme--border-radius);
 	background: var(--theme--background-subdued);
+}
+
+.scheduled-purge .field-hint {
+	margin-bottom: 1rem;
 }
 </style>

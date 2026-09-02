@@ -30,6 +30,15 @@ export const RECYCLE_DEFAULTS: RecycleSettings = {
 	purge_flow_id: null,
 };
 
+/** Storage-browse path for the virtual Recycle folder (single path segment). */
+export function recycleStorageFolderName(folderName: string | null | undefined): string {
+	const raw = String(folderName || RECYCLE_DEFAULT_FOLDER_NAME)
+		.replace(/\\/g, '/')
+		.replace(/^\/+|\/+$/g, '');
+	const segment = raw.split('/').filter(Boolean).pop();
+	return segment || RECYCLE_DEFAULT_FOLDER_NAME;
+}
+
 export function normalizeRecycleSettings(raw: unknown): RecycleSettings {
 	const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
 	const retention = Number(src.retention_days);

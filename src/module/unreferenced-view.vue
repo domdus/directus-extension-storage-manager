@@ -246,11 +246,21 @@
 
 			<div v-if="meta" class="stats-grid">
 				<div class="stat">
-					<span class="stat-value">{{ meta.unreferenced_count.toLocaleString() }}</span>
+					<span class="stat-value">{{ displayUnreferencedCount.toLocaleString() }}</span>
 					<span class="stat-label">
+						<span
+							v-if="resultsFiltered"
+							v-tooltip.top="'Filtered subset of this scan'"
+							class="stat-filtered-dot"
+							aria-hidden="true"
+						/>
 						Unreferenced
 						<v-icon
-							v-tooltip.top="'File Library entries with no remaining references in relations or (optional) text fields, after Min Age / Storage Filter.'"
+							v-tooltip.top="
+								resultsFiltered
+									? 'Unreferenced files in the current filtered subset of this scan.'
+									: 'File Library entries with no remaining references in relations or (optional) text fields, after Min Age / Storage Filter.'
+							"
 							name="help_outline"
 							small
 							class="stat-info"
@@ -258,11 +268,21 @@
 					</span>
 				</div>
 				<div class="stat">
-					<span class="stat-value">{{ formatBytes(meta.unreferenced_bytes ?? 0) }}</span>
+					<span class="stat-value">{{ formatBytes(displayUnreferencedBytes) }}</span>
 					<span class="stat-label">
+						<span
+							v-if="resultsFiltered"
+							v-tooltip.top="'Filtered subset of this scan'"
+							class="stat-filtered-dot"
+							aria-hidden="true"
+						/>
 						Total Size
 						<v-icon
-							v-tooltip.top="'Sum of File Library filesize for all unreferenced files found by this scan.'"
+							v-tooltip.top="
+								resultsFiltered
+									? 'Sum of filesize for the current filtered subset of this scan.'
+									: 'Sum of File Library filesize for all unreferenced files found by this scan.'
+							"
 							name="help_outline"
 							small
 							class="stat-info"
@@ -355,6 +375,7 @@
 			@update:table-spacing="onTableSpacingUpdate"
 			@update:size="onSizeUpdate"
 			@update:sort="onSortUpdate"
+			@update:table-headers="onTableHeadersUpdate"
 		>
 			<template #no-results>
 				<div class="empty-state empty-state--in-layout">
@@ -566,6 +587,7 @@ const showStorageLocationLabels = computed(() => scannedOnce.value);
 /** Zero-result scan: keep empty state in document flow (not layout absolute center). */
 const showEmptyNoItems = computed(() => {
 	if (!scannedOnce.value || sessionExpired.value || scanning.value) return false;
+	if (resultsFiltered.value) return false;
 	return Number(meta.value?.unreferenced_count ?? 0) === 0;
 });
 
@@ -591,12 +613,15 @@ const {
 	refresh: refreshUnreferencedLayout,
 	sessionExpired,
 	totalCount: layoutTotalCount,
+	totalBytes: layoutTotalBytes,
+	resultsFiltered,
 	onLayoutWidth,
 	onLimitUpdate,
 	onFieldsUpdate,
 	onTableSpacingUpdate,
 	onSizeUpdate,
 	onSortUpdate,
+	onTableHeadersUpdate,
 } = useUnreferencedFilesLayout({
 	scanId,
 	search,
@@ -616,6 +641,17 @@ const {
 	resolveHref: (path) => router.resolve(path).href,
 });
 
+/** Prefer live layout totals (updates with header filter/search); fall back to scan meta. */
+const displayUnreferencedCount = computed(() => {
+	if (layoutTotalCount.value != null) return layoutTotalCount.value;
+	return Number(meta.value?.unreferenced_count ?? 0);
+});
+
+const displayUnreferencedBytes = computed(() => {
+	if (layoutTotalBytes.value != null) return layoutTotalBytes.value;
+	return Number(meta.value?.unreferenced_bytes ?? 0);
+});
+
 watch(sessionExpired, (expired) => {
 	if (!expired) return;
 	selection.value = [];
@@ -627,6 +663,8 @@ useStorageLocationBadges({
 	layout,
 	layoutRef,
 	layoutQuery,
+	items: computed(() => layoutState.value.items),
+	loading: computed(() => layoutState.value.loading),
 });
 
 watch([filter, search], () => {
@@ -664,18 +702,6 @@ function onFileDrawerActive(active: boolean) {
 async function refreshLayout() {
 	await nextTick();
 	await refreshUnreferencedLayout();
-	if (meta.value && layoutTotalCount.value != null) {
-		meta.value = {
-			...meta.value,
-			unreferenced_count: layoutTotalCount.value,
-		};
-		if (scanId.value) {
-			savePersistedScan({
-				...(meta.value as ScanMeta),
-				scan_id: scanId.value,
-			});
-		}
-	}
 }
 
 async function patchLifecycle(partial: Record<string, unknown>) {
@@ -1192,6 +1218,15 @@ onMounted(async () => {
 	font-size: 0.8rem;
 	font-weight: 600;
 	color: var(--theme--foreground-subdued);
+}
+
+.stat-filtered-dot {
+	display: inline-block;
+	inline-size: 0.4rem;
+	block-size: 0.4rem;
+	border-radius: 50%;
+	background: var(--theme--primary);
+	flex-shrink: 0;
 }
 
 .stat-info {

@@ -222,6 +222,14 @@ async function deleteFileIfUnreferenced(fileId: string) {
 	}
 }
 
+async function moveFileToRecycleIfUnreferenced(fileId: string) {
+	try {
+		await api.post('/storage-manager/recycle/move-if-unreferenced', { file_ids: [fileId] });
+	} catch (error) {
+		unexpectedError(error);
+	}
+}
+
 function applyRemove(item: DisplayItem) {
 	if (
 		page.value === Math.ceil(totalItemCount.value / limit.value) &&
@@ -245,6 +253,8 @@ async function onRemoveFile(item: DisplayItem) {
 	applyRemove(item);
 	if (policy === 'delete_if_unreferenced' && fileId) {
 		await deleteFileIfUnreferenced(fileId);
+	} else if (policy === 'move_to_recycle' && fileId) {
+		await moveFileToRecycleIfUnreferenced(fileId);
 	}
 }
 

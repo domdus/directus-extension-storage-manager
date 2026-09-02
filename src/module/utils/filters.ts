@@ -91,6 +91,29 @@ export function getStorageFilter(
 	return { _and: clauses };
 }
 
+/** All Recycle Bin files on one storage adapter (virtual `_Recycle` folder). */
+export function getRecycleStorageFilter(location: string, recycleFolderId: string): Filter {
+	return {
+		_and: [
+			{
+				type: {
+					_nnull: true,
+				},
+			},
+			{
+				storage: {
+					_eq: location,
+				},
+			},
+			{
+				folder: {
+					_eq: recycleFolderId,
+				},
+			},
+		],
+	};
+}
+
 export function mergeFilters(a: Filter | null | undefined, b: Filter | null | undefined): Filter | null {
 	if (!a) return b ?? null;
 	if (!b) return a;

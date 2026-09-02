@@ -42,6 +42,7 @@ const isExpandable = computed(() => {
 });
 
 function onContextMenu(event: MouseEvent) {
+	if (props.folder.virtual) return;
 	menu.value?.open(event);
 }
 
@@ -59,7 +60,7 @@ function onChanged() {
 			@contextmenu.prevent="onContextMenu"
 		>
 			<v-list-item-icon>
-				<v-icon name="folder" outline />
+				<v-icon :name="folder.virtual ? 'recycling' : 'folder'" outline />
 			</v-list-item-icon>
 			<v-list-item-content>
 				<v-text-overflow :text="folder.name" />
@@ -80,7 +81,7 @@ function onChanged() {
 	>
 		<template #activator>
 			<v-list-item-icon>
-				<v-icon name="folder" outline />
+				<v-icon :name="folder.virtual ? 'recycling' : 'folder'" outline />
 			</v-list-item-icon>
 			<v-list-item-content>
 				<v-text-overflow :text="folder.name" />
@@ -106,6 +107,7 @@ function onChanged() {
 	</v-list-group>
 
 	<storage-folder-context-menu
+		v-if="!folder.virtual"
 		ref="menu"
 		:location="location"
 		:path="folder.path"

@@ -2,7 +2,7 @@
 	"name": "directus-extension-storage-manager",
 	"description": "Browse, upload, detect, materialize, and move Directus files across storages; find unreferenced File Library entries; and quarantine deletes in a Recycle Bin",
 	"icon": "storage",
-	"version": "1.6.0",
+	"version": "1.7.0",
 	"license": "MIT",
 	"keywords": [
 		"directus",

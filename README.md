@@ -10,7 +10,7 @@ Move files between your Directus storages — local disk, S3, Google Cloud, Azur
 
 Directus can use several storages at once, but it will not move existing files for you. Storage Manager does: browse each storage, upload, find files that are on disk but not in Directus, move files or whole folders, find File Library entries that nothing uses anymore, and optionally quarantine deletes in a Recycle Bin before permanent removal.
 
-When you open a storage from the overview, the left sidebar shows that storage’s folder tree. Folders load as you expand them, so large storages stay quick to navigate.
+When you open a storage from the overview, the left sidebar shows that storage’s folder tree. Folders load as you expand them, so large storages stay quick to navigate. The right sidebar has dedicated panels for the page you are on: **Materialize** in Directus Folders, **Detect** (and **Move** at the storage root) when browsing a storage, and **Restore** inside Recycle.
 
 ### Your storages
 
@@ -87,12 +87,25 @@ Include subfolders if you want the whole tree. Dry Run shows counts before you r
 
 ### Detect files
 
-Find files that are on a storage but not yet in Directus.
+The file list in a storage folder is the **File Library** — files Directus already knows about. A folder can look empty even when objects still sit on disk or in the cloud (for example after a database restore, a failed delete, or files uploaded outside Directus).
+
+Use **Detect** in the right sidebar:
 
 - At the storage root: **Detect Files on {storage}**
 - Inside a folder: **Detect Files in this Folder**
 
-Import adds them to Directus without moving the files. You can also delete leftover files that Directus does not know about. Generated resize/preview files are left alone (use **Thumbnails → Delete All Transforms** at the storage root if you want to clear those).
+That lists files on storage that are not registered yet. **Import** creates File Library rows without copying anything. Titles come from the filename (underscores become spaces). You can also **delete** selected leftovers from storage. Generated thumbnails are left alone (use **Thumbnails → Delete All Transforms** at the storage root).
+
+If you try to delete a storage folder and it comes back or is skipped, open Detect first. Delete Folder only relocates or removes files that are already in Directus.
+
+### Delete storage folders
+
+When you delete a folder on a storage:
+
+- **Move content one level up** — registered files go to the parent folder
+- **Delete all content** — registered files are removed for good
+
+Recycle Bin files under that path stay put, and the folder is not removed until they are restored or purged. Files that exist only on storage must be imported or deleted with Detect first. Empty cloud folders (GCS/S3 placeholders and `.keep` markers) are removed once nothing real is left.
 
 ### Unreferenced Files
 
@@ -106,7 +119,7 @@ Set your scan options, then click **Scan**:
 - **Storage Filter** — limit the search to one storage, or check all
 - **Scan Text Fields** — also look inside rich text, Markdown, JSON, code, multiline, list, tags, and text columns for file links. This can take longer on large sites; turn it off for a faster check of file/image fields only
 
-After a scan you get a short summary and a list of matches (same cards/table layouts as elsewhere in Storage Manager). Select files and choose what to do:
+After a scan you get a short summary and a list of matches (same cards/table layouts as elsewhere in Storage Manager, including storage location badges). Select files and choose what to do:
 
 - **Move to Recycle** — when Recycle Bin is on, quarantine selected files instead of deleting immediately (primary action)
 - **Move to Directus Folder** — organize them in the File Library (virtual folders only)
@@ -115,16 +128,19 @@ After a scan you get a short summary and a list of matches (same cards/table lay
 
 ### Recycle Bin
 
-Open **Recycle Bin** from the left sidebar for an opt-in File Library quarantine. Files stay registered in Directus, but assets in the recycle folder are blocked from `/assets` for everyone, and the folder is hidden from normal File Library browse/search/picker (unless you open that folder on purpose).
+Open **Recycle Bin** from the left sidebar for an opt-in File Library quarantine. Isolation is the point: files stay registered, but `/assets` returns 404 (no thumbnails in collections or Studio), and they cannot be found in file interfaces, search, or the picker unless you open the recycle folder on purpose. If still-used content was quarantined, the gap shows up immediately — move the file out of Recycle to restore access.
 
 ![Recycle Bin status, retention, purge actions, and scheduled purge Flow](https://raw.githubusercontent.com/domdus/directus-extension-storage-manager/main/docs/screenshot_storage_recycle_bin.png)
 
-Turn **On** to create `storage_manager_trashed_at` on `directus_files` and a recycle folder (default **`_Recycle`** — you can pick another File Library folder while Off). Unreferenced Files can move selections here; any other File Library file can be moved into this folder as well when permissions allow.
+Turn **On** to create `storage_manager_trashed_at` on `directus_files` and a recycle folder (default **`_Recycle`** — you can pick another File Library folder while Off). Unreferenced Files can move selections here. You can also **Move to Recycle** from a storage or Directus Folders browse when files or folders are selected.
+
+On each storage browse page, Recycle files for that adapter appear in a virtual folder of the same name (objects stay at their original keys). From there you can restore selected files, or use **Restore All**. Restore always returns files to the File Library root — storage keys do not move.
 
 While On you can:
 
 - Set **Retention (days)** — how long files stay before they are purge candidates
 - **Dry Run Purge** / **Purge Expired** — permanently delete files older than retention after re-checking that they are still unreferenced
+- **Restore All** — sidebar action on Recycle Bin and on each storage’s virtual `_Recycle` folder. Restores every quarantined file (or every Recycle file on that storage) to the File Library root, with progress, cancel, and background for large bins
 - **Scheduled Purge** — optionally create a daily Schedule Flow (`0 3 * * *`) that runs **Purge Recycle Bin**. Turning Recycle Bin off pauses a linked Flow; you can open or remove the Flow from this page
 
 Source of truth is the folder id. Renaming the folder in the File Library is fine.
@@ -144,10 +160,10 @@ For each group you can choose:
 
 | Setting | Options |
 | ------- | ------- |
-| **On deselect** | Keep file in library · Ask (Storage Manager only) · Delete file if unreferenced |
-| **On item delete** | Keep file in library · Delete file if unreferenced |
+| **On deselect** | Keep file in library · Move to Recycle Bin if unreferenced · Ask (Storage Manager only) · Delete file if unreferenced |
+| **On item delete** | Keep file in library · Move to Recycle Bin if unreferenced · Delete file if unreferenced |
 
-Storage Manager fields can override these defaults per field in Data Model (including **Use File Interfaces default**). Delete only runs when nothing else still references the file.
+**Move to Recycle Bin** only runs when Recycle Bin is On and the file is still unused elsewhere; otherwise the file is kept. Storage Manager fields can override these defaults per field in Data Model (including **Use File Interfaces default**). Delete / recycle only run when nothing else still references the file.
 
 ### Settings
 
@@ -172,8 +188,9 @@ The **Storage Manager** Flow operation can move (or copy) **selected file IDs** 
 7. For collection fields that must land on a specific storage, use **File with Storage**, **Files with Storage**, or **Image with Storage** instead of the native file interfaces.
 8. Use **File Interfaces** to set default cleanup behaviour when editors clear a file field or delete an item (works for native file fields too).
 9. Use **Unreferenced Files** when you want to find leftover File Library entries, then move them to Recycle, relocate, or delete permanently.
-10. Turn on **Recycle Bin** if you want a quarantine step before permanent delete, and optionally create **Scheduled Purge**.
-11. Use **Dry Run**, then **Move**.
+10. Turn on **Recycle Bin** if you want a quarantine step before permanent delete, and optionally create **Scheduled Purge**. Use **Restore All** (or restore selected files) to put them back at the File Library root.
+11. If a storage folder looks empty, open **Detect** — files may still exist on storage that Directus does not know about.
+12. Use **Dry Run**, then **Move**.
 
 ## Installation
 

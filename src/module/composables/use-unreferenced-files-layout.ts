@@ -4,7 +4,8 @@ import { computed, ref, watch, type Ref } from 'vue';
 import type { LayoutOptions, LayoutQuery } from './use-files-browser-preset';
 
 const COLLECTION = 'directus_files';
-const DEFAULT_FIELDS = ['title', 'type', 'filesize', 'modified_on', 'storage'] as const;
+/** Match File Library tabular defaults — `$thumbnail` is the fake self-m2o cards/list use for previews. */
+const DEFAULT_FIELDS = ['$thumbnail', 'title', 'type', 'filesize', 'modified_on', 'storage'] as const;
 
 function normalizeLimit(raw: unknown): number {
 	const n = Number(raw);
@@ -42,6 +43,8 @@ export function useUnreferencedFilesLayout(options: {
 	const error = ref<unknown>(null);
 	const sessionExpired = ref(false);
 	const totalCount = ref<number | null>(null);
+	const totalBytes = ref<number | null>(null);
+	const resultsFiltered = ref(false);
 	const cardsWidth = ref(0);
 
 	const page = computed({
@@ -112,24 +115,45 @@ export function useUnreferencedFilesLayout(options: {
 			.filter(Boolean) as Array<Field & { key: string }>,
 	);
 
-	const tableHeaders = computed(() =>
-		activeFields.value.map((field) => ({
-			text: field.name,
-			value: field.key,
-			description: null,
-			width: options.layoutOptions.value?.widths?.[field.key] || 160,
-			align: options.layoutOptions.value?.align?.[field.key] || 'left',
-			field: {
-				display: field.meta?.display,
-				displayOptions: field.meta?.display_options,
-				interface: field.meta?.interface,
-				interfaceOptions: field.meta?.options,
-				type: field.type,
-				field: field.field,
-				collection: field.collection,
-			},
-		})),
-	);
+	function applyTableHeaders(val: Array<{ value?: string; width?: number }>) {
+		const nextFields = val.map((header) => String(header?.value || '')).filter(Boolean);
+		const widths: Record<string, number> = { ...(options.layoutOptions.value?.widths || {}) };
+		for (const header of val) {
+			if (!header?.value) continue;
+			widths[header.value] = header.width != null && Number.isFinite(Number(header.width))
+				? Number(header.width)
+				: widths[header.value] || 160;
+		}
+		options.layoutOptions.value = { ...options.layoutOptions.value, widths };
+		if (nextFields.length) fields.value = nextFields;
+	}
+
+	const tableHeaders = computed({
+		get() {
+			return activeFields.value.map((field) => ({
+				text: field.name,
+				value: field.key,
+				description: null,
+				width: options.layoutOptions.value?.widths?.[field.key] || 160,
+				align: options.layoutOptions.value?.align?.[field.key] || 'left',
+				sortable:
+					field.field !== '$thumbnail' &&
+					!['json', 'alias', 'presentation', 'translations'].includes(String(field.type)),
+				field: {
+					display: field.meta?.display,
+					displayOptions: field.meta?.display_options,
+					interface: field.meta?.interface,
+					interfaceOptions: field.meta?.options,
+					type: field.type,
+					field: field.field,
+					collection: field.collection,
+				},
+			}));
+		},
+		set(val: Array<{ value: string; width?: number }>) {
+			applyTableHeaders(val);
+		},
+	});
 
 	const tableSort = computed(() => {
 		const raw = sort.value?.[0];
@@ -188,11 +212,25 @@ export function useUnreferencedFilesLayout(options: {
 		},
 	});
 
+	/**
+	 * Cards pass `item[imageSource]` into layout-card as `file` (needs `{ id, type, modified_on }`).
+	 * Native File Library defaults to `$thumbnail`; we used to default to `id` (UUID string) so
+	 * thumbnails never rendered and `/assets` was never requested.
+	 */
 	const imageSource = computed({
-		get: () => options.layoutOptions.value?.imageSource || 'id',
+		get() {
+			const raw = options.layoutOptions.value?.imageSource;
+			if (!raw || raw === 'id') return '$thumbnail';
+			return raw;
+		},
 		set(value: string | null) {
 			options.layoutOptions.value = { ...options.layoutOptions.value, imageSource: value };
 		},
+	});
+
+	const fileFields = computed(() => {
+		const thumb = fieldsStore.getField(COLLECTION, '$thumbnail');
+		return thumb ? [thumb] : [];
 	});
 
 	function onAlignChange(field: string, align: 'left' | 'center' | 'right') {
@@ -209,9 +247,12 @@ export function useUnreferencedFilesLayout(options: {
 		};
 	}
 
+	/** Same formula as File Library layout-cards — few items stay at `--size`, they do not stretch. */
 	const isSingleRow = computed(() => {
-		const cards = Math.max(1, Math.ceil(items.value.length / Math.max(1, size.value)));
-		return cards <= 1 && cardsWidth.value > 0;
+		const count = items.value.length;
+		if (count === 0 || cardsWidth.value <= 0) return true;
+		const needed = count * (size.value * 40) + Math.max(0, count - 1) * 24;
+		return needed <= cardsWidth.value;
 	});
 
 	let loadGeneration = 0;
@@ -220,6 +261,8 @@ export function useUnreferencedFilesLayout(options: {
 		if (!options.scanId.value) {
 			items.value = [];
 			totalCount.value = 0;
+			totalBytes.value = 0;
+			resultsFiltered.value = false;
 			return;
 		}
 
@@ -236,6 +279,7 @@ export function useUnreferencedFilesLayout(options: {
 					limit: limit.value,
 					search: options.search.value?.trim() || undefined,
 					filter: options.filter.value ? JSON.stringify(options.filter.value) : undefined,
+					sort: sort.value?.[0],
 				},
 			});
 
@@ -248,10 +292,15 @@ export function useUnreferencedFilesLayout(options: {
 				$thumbnail: row,
 			}));
 			totalCount.value = Number(res.data?.meta?.total_count) || 0;
+			totalBytes.value =
+				res.data?.meta?.total_bytes != null ? Number(res.data.meta.total_bytes) || 0 : null;
+			resultsFiltered.value = Boolean(res.data?.meta?.filtered);
 		} catch (err: any) {
 			if (generation !== loadGeneration) return;
 			items.value = [];
 			totalCount.value = 0;
+			totalBytes.value = null;
+			resultsFiltered.value = false;
 
 			const status = Number(err?.response?.status) || 0;
 			const message = String(err?.response?.data?.errors?.[0]?.message || err?.message || '');
@@ -334,6 +383,7 @@ export function useUnreferencedFilesLayout(options: {
 				JSON.stringify(options.filter.value || null),
 				page.value,
 				limit.value,
+				JSON.stringify(sort.value || []),
 			] as const,
 		() => {
 			void loadItems();
@@ -383,6 +433,11 @@ export function useUnreferencedFilesLayout(options: {
 		onSortChange,
 		onAlignChange,
 		onWidthChange,
+		'onUpdate:tableHeaders': applyTableHeaders,
+		'onUpdate:activeFields': (value: Array<{ field?: string; key?: string }>) => {
+			const next = value.map((field) => String(field.field || field.key || '')).filter(Boolean);
+			if (next.length) fields.value = next;
+		},
 		changeManualSort: async () => undefined,
 		resetPresetAndRefresh,
 		selectAll,
@@ -399,7 +454,7 @@ export function useUnreferencedFilesLayout(options: {
 		width: cardsWidth.value,
 		sort: sort.value,
 		hasPrependContent: false,
-		fileFields: ['id'] as string[],
+		fileFields: fileFields.value,
 		/**
 		 * Directus layout-options / layout components emit `update:X`.
 		 * Host `createLayoutWrapper` exposes matching `onUpdate:X` on layoutState —
@@ -473,6 +528,10 @@ export function useUnreferencedFilesLayout(options: {
 		sort.value = value;
 	}
 
+	function onTableHeadersUpdate(value: Array<{ value?: string; width?: number }>) {
+		applyTableHeaders(value);
+	}
+
 	return {
 		layoutState,
 		refresh,
@@ -483,6 +542,9 @@ export function useUnreferencedFilesLayout(options: {
 		onTableSpacingUpdate,
 		onSizeUpdate,
 		onSortUpdate,
+		onTableHeadersUpdate,
 		totalCount,
+		totalBytes,
+		resultsFiltered,
 	};
 }

@@ -9,8 +9,10 @@ import {
 	purgeExpiredRecycle,
 	removeRecyclePurgeFlow,
 	restoreFilesFromRecycle,
+	restoreRecycleFilesBulk,
 	type RecycleContext,
 } from './recycle';
+import { listConfiguredLocations } from './usage';
 import { RECYCLE_DEFAULT_FOLDER_NAME, RECYCLE_DEFAULTS, RECYCLE_PURGE_FLOW_CRON } from '../shared/recycle';
 
 type EndpointContext = {
@@ -184,6 +186,38 @@ export function registerRecycleRoutes(router: Router, context: EndpointContext):
 		}
 	});
 
+	/**
+	 * Lifecycle helper: move to Recycle only when still unreferenced.
+	 * Soft-skips when Recycle Bin is off (does not fail the request).
+	 * Authenticated users (not only admins) — same bar as delete-if-unreferenced.
+	 */
+	router.post('/recycle/move-if-unreferenced', async (req: Request, res: Response, next: NextFunction) => {
+		try {
+			if (!(req as any).accountability?.user && !accountabilityIsAdmin((req as any).accountability)) {
+				res.status(403).json({
+					errors: [{ message: 'Authentication required', extensions: { code: 'FORBIDDEN' } }],
+				});
+				return;
+			}
+			const ids = parseIds((req.body as any)?.file_ids ?? (req.body as any)?.ids);
+			if (!ids.length) {
+				res.status(400).json({ errors: [{ message: 'Provide file_ids' }] });
+				return;
+			}
+			if (ids.length > 50) {
+				res.status(400).json({ errors: [{ message: 'At most 50 file ids per request' }] });
+				return;
+			}
+			const { moveFilesToRecycleIfUnreferenced } = await import('./recycle');
+			const result = await moveFilesToRecycleIfUnreferenced(recycleCtx(context, req), ids);
+			res.json({ data: result });
+		} catch (error: any) {
+			res.status(400).json({
+				errors: [{ message: error?.message || 'Move to Recycle failed' }],
+			});
+		}
+	});
+
 	router.post('/recycle/restore', async (req: Request, res: Response, next: NextFunction) => {
 		try {
 			if (!requireAdmin(req, res)) return;
@@ -198,6 +232,104 @@ export function registerRecycleRoutes(router: Router, context: EndpointContext):
 			res.status(400).json({
 				errors: [{ message: error?.message || 'Restore failed' }],
 			});
+		}
+	});
+
+	/**
+	 * SSE: restore every Recycle file (optional `storage` filter) in chunks.
+	 * Safe for hundreds of thousands of rows — IDs stay on the server.
+	 */
+	router.post('/recycle/restore/stream', async (req: Request, res: Response, next: NextFunction) => {
+		try {
+			if (!requireAdmin(req, res)) return;
+
+			const body = (req.body || {}) as { storage?: string | null };
+			const storageRaw = body.storage == null || body.storage === '' ? null : String(body.storage);
+			if (storageRaw) {
+				const locations = listConfiguredLocations(context.env);
+				if (!locations.includes(storageRaw)) {
+					res.status(400).json({
+						errors: [{ message: `Unknown storage “${storageRaw}”` }],
+					});
+					return;
+				}
+			}
+
+			res.status(200);
+			res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+			res.setHeader('Cache-Control', 'no-cache, no-transform');
+			res.setHeader('Connection', 'keep-alive');
+			res.setHeader('X-Accel-Buffering', 'no');
+			(res as any).flushHeaders?.();
+
+			let closed = false;
+			const markClosed = () => {
+				closed = true;
+			};
+			req.on('close', markClosed);
+			res.on('close', markClosed);
+
+			const send = (event: Record<string, unknown>) => {
+				if (closed) return;
+				res.write(`data: ${JSON.stringify(event)}\n\n`);
+				const flush = (res as any).flush;
+				if (typeof flush === 'function') flush.call(res);
+			};
+
+			const heartbeat = setInterval(() => {
+				send({ type: 'heartbeat', ts: Date.now() });
+			}, 12_000);
+
+			try {
+				send({
+					type: 'start',
+					message: storageRaw
+						? `Restoring Recycle files on ${storageRaw}…`
+						: 'Restoring Recycle files…',
+					storage: storageRaw,
+				});
+
+				const result = await restoreRecycleFilesBulk(recycleCtx(context, req), {
+					storage: storageRaw,
+					isCancelled: () => closed,
+					onProgress: (progress) => {
+						send({ type: 'progress', ...progress });
+					},
+				});
+
+				context.logger.info(
+					`[storage-manager] recycle restore stream: restored=${result.restored} failed=${result.failed} total=${result.total} cancelled=${result.cancelled} storage=${storageRaw || '*'}`,
+				);
+
+				send({
+					type: result.cancelled ? 'cancelled' : 'done',
+					data: result,
+				});
+			} catch (err) {
+				send({
+					type: 'error',
+					message: err instanceof Error ? err.message : String(err),
+				});
+			} finally {
+				clearInterval(heartbeat);
+				if (!closed) res.end();
+			}
+		} catch (error) {
+			if (!res.headersSent) {
+				next(error);
+				return;
+			}
+			try {
+				res.write(
+					`data: ${JSON.stringify({
+						type: 'error',
+						message: error instanceof Error ? error.message : String(error),
+					})}\n\n`,
+				);
+				res.end();
+			} catch {
+				// ignore
+			}
 		}
 	});
 

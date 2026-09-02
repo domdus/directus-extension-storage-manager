@@ -34,6 +34,7 @@
 
 			<p class="page-intro">
 				What happens to a file when a field is deselected/cleared or the collection item holding it is deleted.
+				<strong>Move to Recycle Bin</strong> requires Recycle Bin to be On; otherwise the file is kept.
 			</p>
 
 			<section class="policy-block">
@@ -113,17 +114,20 @@ const message = ref<{ type: 'success' | 'danger'; text: string } | null>(null);
 
 const nativeDeselectChoices = [
 	{ text: 'Keep file in library', value: 'keep' },
+	{ text: 'Move to Recycle Bin if unreferenced', value: 'move_to_recycle' },
 	{ text: 'Delete file if unreferenced', value: 'delete_if_unreferenced' },
 ];
 
 const smDeselectChoices = [
 	{ text: 'Keep file in library', value: 'keep' },
+	{ text: 'Move to Recycle Bin if unreferenced', value: 'move_to_recycle' },
 	{ text: 'Ask (deselect vs delete if unused)', value: 'ask' },
 	{ text: 'Delete file if unreferenced', value: 'delete_if_unreferenced' },
 ];
 
 const itemDeleteChoices = [
 	{ text: 'Keep file in library', value: 'keep' },
+	{ text: 'Move to Recycle Bin if unreferenced', value: 'move_to_recycle' },
 	{ text: 'Delete file if unreferenced', value: 'delete_if_unreferenced' },
 ];
 

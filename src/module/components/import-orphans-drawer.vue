@@ -47,7 +47,7 @@
 
 			<div class="toolbar">
 				<v-button secondary :loading="scanning" :disabled="deleting" @click="scan">
-					<v-icon name="radar" left />
+					<v-icon name="folder_off" left />
 					{{ scopedPath ? 'Scan Folder' : 'Scan Storage' }}
 				</v-button>
 				<v-button

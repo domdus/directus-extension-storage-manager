@@ -55,16 +55,30 @@ function applyTableStorageBadges() {
 export function useStorageLocationBadges(options: {
 	enabled: Ref<boolean>;
 	layout: Ref<string>;
-	layoutRef: Ref<any>;
+	layoutRef?: Ref<any>;
 	layoutQuery: Ref<Record<string, any>>;
+	/** When set (Unreferenced custom layout), use these instead of `layoutRef.state`. */
+	items?: Ref<unknown[] | undefined>;
+	loading?: Ref<boolean>;
 }) {
 	const api = useApi();
+
+	function currentItems(): Record<string, any>[] | undefined {
+		if (options.items) return options.items.value as Record<string, any>[] | undefined;
+		return options.layoutRef?.value?.state?.items;
+	}
+
+	function currentLoading(): boolean {
+		if (options.loading) return Boolean(options.loading.value);
+		return Boolean(options.layoutRef?.value?.state?.loading);
+	}
 
 	async function applyStorageBadges(items: Record<string, any>[] | undefined) {
 		clearStorageLocationBadges();
 
 		if (!options.enabled.value) return;
 
+		await nextTick();
 		await nextTick();
 
 		if (options.layout.value === 'tabular') {
@@ -74,7 +88,17 @@ export function useStorageLocationBadges(options: {
 
 		if (options.layout.value !== 'cards' || !items?.length) return;
 
-		const cards = document.querySelectorAll('.layout-cards .grid .card:not(.folder-card)');
+		let cards = document.querySelectorAll('.layout-cards .grid .card:not(.folder-card)');
+
+		for (let attempt = 0; attempt < 8 && !cards.length; attempt++) {
+			await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+			cards = document.querySelectorAll('.layout-cards .grid .card:not(.folder-card)');
+		}
+
+		if (!cards.length) {
+			cards = document.querySelectorAll('.layout-cards .card:not(.folder-card)');
+		}
+
 		if (!cards.length) return;
 
 		const pk = 'id';
@@ -128,12 +152,12 @@ export function useStorageLocationBadges(options: {
 				options.layoutQuery.value.page,
 				options.layoutQuery.value.limit,
 				JSON.stringify(options.layoutQuery.value.sort ?? []),
-				options.layoutRef.value?.state?.loading,
-				options.layoutRef.value?.state?.items,
+				currentLoading(),
+				currentItems(),
 			] as const,
 		() => {
-			if (options.layoutRef.value?.state?.loading) return;
-			scheduleStorageBadges(options.layoutRef.value?.state?.items);
+			if (currentLoading()) return;
+			scheduleStorageBadges(currentItems());
 		},
 		{ deep: true, flush: 'post' },
 	);

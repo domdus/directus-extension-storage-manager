@@ -1,77 +1,59 @@
 import { useApi, useStores } from '@directus/extensions-sdk';
 import { computed, reactive, ref } from 'vue';
-import { formatBytes } from '../../shared/format';
 
-export type UnreferencedScanPayload = {
-	min_age_minutes: number;
-	scan_text_fields: boolean;
+export type RecycleRestorePayload = {
 	storage: string | null;
-	limit?: number;
-	offset?: number;
 };
 
-export type UnreferencedScanMeta = {
-	total_files: number;
-	used_count: number;
-	unreferenced_count: number;
-	unreferenced_bytes?: number;
-	relation_targets: number;
-	text_targets: number;
-	collections_checked: number;
-	min_age_minutes: number;
-	scan_text_fields: boolean;
-	elapsed_ms: number;
-	truncated: boolean;
-	/** Server-side scan session for paged `/unreferenced/items`. */
-	scan_id?: string;
-	ids_truncated?: boolean;
-	ids?: string[];
+export type RecycleRestoreResult = {
+	restored: number;
+	failed: number;
+	total: number;
+	cancelled: boolean;
+	storage: string | null;
 };
 
-export type UnreferencedScanProgress = {
-	phase: 'idle' | 'relations' | 'text' | 'files' | 'finalize' | 'done' | 'error';
+export type RecycleRestoreJobProgress = {
+	phase: 'idle' | 'prepare' | 'restore' | 'done' | 'error';
 	message: string;
 	current: number;
 	total: number;
-	used_count: number;
-	unreferenced_count: number;
+	restored: number;
+	failed: number;
 	elapsed_ms: number;
 };
 
 type JobListener = {
-	onProgress?: (progress: UnreferencedScanProgress) => void;
-	onDone?: (meta: UnreferencedScanMeta) => void;
+	onProgress?: (progress: RecycleRestoreJobProgress) => void;
+	onDone?: (result: RecycleRestoreResult) => void;
 	onError?: (error: Error) => void;
-	onCancel?: () => void;
+	onCancel?: (partial: RecycleRestoreResult | null) => void;
 };
 
-/**
- * Module-level unreferenced scan job — survives drawer close / route changes
- * (same pattern as useMigrateJob).
- */
 const running = ref(false);
 const backgrounded = ref(false);
-const result = ref<UnreferencedScanMeta | null>(null);
+const result = ref<RecycleRestoreResult | null>(null);
 const errorMessage = ref<string | null>(null);
 const reopenNonce = ref(0);
-const returnToPath = ref('/storage-manager/unreferenced');
+const returnToPath = ref('/storage-manager/recycle');
 
-const progress = reactive<UnreferencedScanProgress>({
+const progress = reactive<RecycleRestoreJobProgress>({
 	phase: 'idle',
 	message: '',
 	current: 0,
 	total: 0,
-	used_count: 0,
-	unreferenced_count: 0,
+	restored: 0,
+	failed: 0,
 	elapsed_ms: 0,
 });
 
 let abortController: AbortController | null = null;
 let notificationId: string | null = null;
 let listeners: JobListener = {};
-let activePayload: UnreferencedScanPayload | null = null;
+let activePayload: RecycleRestorePayload | null = null;
 let navigateToDetails: (() => void) | null = null;
 let startedAt = 0;
+let lastPartial: RecycleRestoreResult | null = null;
 
 let notificationsStore: {
 	add: (n: Record<string, unknown>) => string;
@@ -98,19 +80,19 @@ function getAuthHeaders(api: ReturnType<typeof useApi>): Record<string, string> 
 	return headers;
 }
 
-function resolveScanUrl(api: ReturnType<typeof useApi>): string {
+function resolveRestoreUrl(api: ReturnType<typeof useApi>): string {
 	const base = String((api as any)?.defaults?.baseURL || '').replace(/\/$/, '');
-	const path = '/storage-manager/unreferenced/scan/stream';
+	const path = '/storage-manager/recycle/restore/stream';
 	return base ? `${base}${path}` : path;
 }
 
 function resetProgress() {
 	progress.phase = 'idle';
-	progress.message = 'Starting scan…';
+	progress.message = 'Starting restore…';
 	progress.current = 0;
 	progress.total = 0;
-	progress.used_count = 0;
-	progress.unreferenced_count = 0;
+	progress.restored = 0;
+	progress.failed = 0;
 	progress.elapsed_ms = 0;
 }
 
@@ -123,16 +105,10 @@ function progressPercent(): number {
 }
 
 function toastTitle(): string {
-	if (progress.phase === 'files' && progress.total > 0) {
-		return `Scanning files ${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`;
+	if (progress.total > 0) {
+		return `Restoring ${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`;
 	}
-	if (progress.phase === 'relations' && progress.total > 0) {
-		return `Checking relations ${progress.current}/${progress.total}`;
-	}
-	if (progress.phase === 'text' && progress.total > 0) {
-		return `Scanning text fields ${progress.current}/${progress.total}`;
-	}
-	return progress.message || 'Scanning unreferenced files…';
+	return progress.message || 'Restoring Recycle files…';
 }
 
 function updateBackgroundToast() {
@@ -144,14 +120,14 @@ function updateBackgroundToast() {
 		title: toastTitle(),
 		text: progress.message
 			? `${progress.message} · click for details`
-			: 'Click for details — scan continues in the background.',
+			: 'Click for details — restore continues in the background.',
 		loading: progress.total === 0,
 		progress: pct,
 		type: 'info',
 		persist: true,
 		closeable: true,
 		alwaysShowText: true,
-		icon: 'radar',
+		icon: 'undo',
 		dismissText: 'Details',
 		dismissIcon: 'open_in_new',
 		dismissAction: () => {
@@ -192,18 +168,16 @@ function applyProgressEvent(event: Record<string, any>) {
 		return;
 	}
 	if (event.type === 'start') {
-		progress.phase = 'relations';
-		progress.message = String(event.message || 'Starting scan…');
+		progress.phase = 'prepare';
+		progress.message = String(event.message || 'Starting restore…');
 		progress.elapsed_ms = Date.now() - startedAt;
 	} else if (event.type === 'progress') {
-		progress.phase = (event.phase as UnreferencedScanProgress['phase']) || progress.phase;
-		progress.message = String(event.message || 'Scanning…');
+		progress.phase = (event.phase as RecycleRestoreJobProgress['phase']) || progress.phase;
+		progress.message = String(event.message || 'Restoring…');
 		progress.current = Number(event.current) || 0;
 		progress.total = Number(event.total) || 0;
-		if (event.used_count != null) progress.used_count = Number(event.used_count) || 0;
-		if (event.unreferenced_count != null) {
-			progress.unreferenced_count = Number(event.unreferenced_count) || 0;
-		}
+		if (event.restored != null) progress.restored = Number(event.restored) || 0;
+		if (event.failed != null) progress.failed = Number(event.failed) || 0;
 		progress.elapsed_ms = Date.now() - startedAt;
 	}
 
@@ -214,9 +188,9 @@ function applyProgressEvent(event: Record<string, any>) {
 async function parseSseStream(
 	response: Response,
 	onEvent: (event: Record<string, any>) => void,
-): Promise<UnreferencedScanMeta> {
+): Promise<RecycleRestoreResult> {
 	if (!response.ok) {
-		let message = `Scan failed (${response.status})`;
+		let message = `Restore failed (${response.status})`;
 		try {
 			const json = await response.json();
 			message = json?.errors?.[0]?.message || message;
@@ -225,12 +199,13 @@ async function parseSseStream(
 		}
 		throw new Error(message);
 	}
-	if (!response.body) throw new Error('No response body for scan stream');
+	if (!response.body) throw new Error('No response body for restore stream');
 
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = '';
-	let finalMeta: UnreferencedScanMeta | null = null;
+	let finalResult: RecycleRestoreResult | null = null;
+	let cancelledResult: RecycleRestoreResult | null = null;
 
 	while (true) {
 		const { done, value } = await reader.read();
@@ -253,18 +228,19 @@ async function parseSseStream(
 				}
 
 				if (event.type === 'error') {
-					throw new Error(event.message || 'Scan failed');
+					throw new Error(event.message || 'Restore failed');
 				}
-				if (event.type === 'done') {
-					finalMeta = event.meta as UnreferencedScanMeta;
+				if (event.type === 'done' || event.type === 'cancelled') {
+					finalResult = event.data as RecycleRestoreResult;
+					if (event.type === 'cancelled') cancelledResult = finalResult;
 					progress.phase = 'done';
-					progress.message = 'Scan complete';
-					progress.elapsed_ms = Number(finalMeta?.elapsed_ms) || Date.now() - startedAt;
-					if (finalMeta) {
-						progress.unreferenced_count = finalMeta.unreferenced_count;
-						progress.used_count = finalMeta.used_count;
-						progress.current = finalMeta.total_files;
-						progress.total = finalMeta.total_files;
+					progress.message = String(finalResult?.cancelled ? 'Restore cancelled' : 'Restore complete');
+					progress.elapsed_ms = Date.now() - startedAt;
+					if (finalResult) {
+						progress.restored = finalResult.restored;
+						progress.failed = finalResult.failed;
+						progress.current = finalResult.restored + finalResult.failed;
+						progress.total = finalResult.total;
 					}
 				} else {
 					onEvent(event);
@@ -273,11 +249,12 @@ async function parseSseStream(
 		}
 	}
 
-	if (!finalMeta) throw new Error('Scan stream ended without a result');
-	return finalMeta;
+	if (cancelledResult) return cancelledResult;
+	if (!finalResult) throw new Error('Restore stream ended without a result');
+	return finalResult;
 }
 
-export function useUnreferencedScanJob() {
+export function useRecycleRestoreJob() {
 	const api = useApi();
 
 	if (!notificationsStore) {
@@ -295,67 +272,80 @@ export function useUnreferencedScanJob() {
 		}
 	}
 
-	const isBusy = computed(() => running.value);
-
-	async function start(payload: UnreferencedScanPayload, opts?: { listener?: JobListener }) {
-		if (running.value) throw new Error('A scan is already running');
+	async function start(payload: RecycleRestorePayload, opts?: { listener?: JobListener }) {
+		if (running.value) throw new Error('A restore is already running');
 
 		activePayload = payload;
 		running.value = true;
 		backgrounded.value = false;
 		result.value = null;
 		errorMessage.value = null;
+		lastPartial = null;
 		abortController = new AbortController();
 		startedAt = Date.now();
 		if (opts?.listener) listeners = opts.listener;
 		resetProgress();
 
 		try {
-			const response = await fetch(resolveScanUrl(api), {
+			const response = await fetch(resolveRestoreUrl(api), {
 				method: 'POST',
 				headers: getAuthHeaders(api),
-				body: JSON.stringify({
-					min_age_minutes: payload.min_age_minutes,
-					scan_text_fields: payload.scan_text_fields,
-					storage: payload.storage,
-					limit: payload.limit ?? 1,
-					offset: payload.offset ?? 0,
-				}),
+				body: JSON.stringify({ storage: payload.storage }),
 				credentials: 'same-origin',
 				signal: abortController.signal,
 			});
 
-			const meta = await parseSseStream(response, applyProgressEvent);
-			result.value = meta;
+			const data = await parseSseStream(response, applyProgressEvent);
+			lastPartial = data;
+			result.value = data;
 
 			if (backgrounded.value) {
-				const sizeHint =
-					meta.unreferenced_bytes != null ? ` · ${formatBytes(meta.unreferenced_bytes)}` : '';
-				finishToast(
-					'success',
-					`Scan complete · ${meta.unreferenced_count.toLocaleString()} unreferenced${sizeHint}`,
-					`${meta.total_files.toLocaleString()} files checked`,
-				);
+				if (data.cancelled) {
+					finishToast(
+						'warning',
+						'Restore cancelled',
+						`${data.restored.toLocaleString()} restored of ${data.total.toLocaleString()}`,
+					);
+				} else {
+					finishToast(
+						'success',
+						`Restored ${data.restored.toLocaleString()} file(s)`,
+						data.failed ? `${data.failed.toLocaleString()} failed` : undefined,
+					);
+				}
 			}
 
-			listeners.onDone?.(meta);
-			return meta;
+			if (data.cancelled) listeners.onCancel?.(data);
+			else listeners.onDone?.(data);
+			return data;
 		} catch (err: any) {
 			if (err?.name === 'AbortError') {
 				progress.phase = 'idle';
-				progress.message = 'Scan cancelled';
+				progress.message = 'Restore cancelled';
+				const partial: RecycleRestoreResult = lastPartial ?? {
+					restored: progress.restored,
+					failed: progress.failed,
+					total: progress.total,
+					cancelled: true,
+					storage: payload.storage,
+				};
+				lastPartial = partial;
 				if (backgrounded.value) {
-					finishToast('warning', 'Scan cancelled', progress.message);
+					finishToast(
+						'warning',
+						'Restore cancelled',
+						`${partial.restored.toLocaleString()} restored`,
+					);
 				}
-				listeners.onCancel?.();
-				return null;
+				listeners.onCancel?.(partial);
+				return partial;
 			}
 
-			const message = err?.message || 'Scan failed';
+			const message = err?.message || 'Restore failed';
 			errorMessage.value = message;
 			progress.phase = 'error';
 			progress.message = message;
-			if (backgrounded.value) finishToast('error', 'Scan failed', message);
+			if (backgrounded.value) finishToast('error', 'Restore failed', message);
 			listeners.onError?.(err instanceof Error ? err : new Error(message));
 			throw err;
 		} finally {
@@ -383,14 +373,14 @@ export function useUnreferencedScanJob() {
 		if (notifications && !notificationId) {
 			notificationId = notifications.add({
 				title: toastTitle(),
-				text: 'Click for details — scan continues in the background.',
+				text: 'Click for details — restore continues in the background.',
 				type: 'info',
 				persist: true,
 				closeable: true,
 				alwaysShowText: true,
 				loading: progress.total === 0,
 				progress: progress.total === 0 ? undefined : progressPercent(),
-				icon: 'radar',
+				icon: 'undo',
 				dismissText: 'Details',
 				dismissIcon: 'open_in_new',
 				dismissAction: () => {
@@ -419,6 +409,7 @@ export function useUnreferencedScanJob() {
 	function clearLastResult() {
 		result.value = null;
 		errorMessage.value = null;
+		lastPartial = null;
 	}
 
 	return {
@@ -430,7 +421,6 @@ export function useUnreferencedScanJob() {
 		reopenNonce,
 		returnToPath,
 		activePayload: computed(() => activePayload),
-		isBusy,
 		start,
 		runInBackground,
 		attachForeground,

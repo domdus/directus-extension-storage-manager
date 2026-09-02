@@ -1,6 +1,7 @@
 import { normalizeUuid } from '../shared/uuid-extract';
 import {
 	LIFECYCLE_DEFAULTS,
+	isCleanupLifecyclePolicy,
 	normalizeLifecycleSettings,
 	type FileLifecycleDeselectAction,
 	type FileLifecycleItemDeleteAction,
@@ -10,7 +11,7 @@ import { loadSettings } from './settings';
 
 type Logger = {
 	warn: (msg: string, ...args: unknown[]) => void;
-	info?: (msg: string, ...args: unknown[]) => void;
+	info?: (msg: string) => void;
 };
 
 type HookContext = {
@@ -28,6 +29,11 @@ type FieldLifecycleOptions = {
 	onItemDelete: FileLifecycleItemDeleteAction | null;
 };
 
+type PendingCleanup = {
+	deleteIds: string[];
+	recycleIds: string[];
+};
+
 const SM_IFACES = new Set([
 	'storage-manager-file-with-storage',
 	'storage-manager-image-with-storage',
@@ -35,6 +41,28 @@ const SM_IFACES = new Set([
 ]);
 
 const NATIVE_IFACES = new Set(['file', 'file-image', 'files']);
+
+function parseDeselectOption(kind: FieldLifecycleKind, value: unknown): FileLifecycleDeselectAction | null {
+	if (kind === 'storage_manager') {
+		if (
+			value === 'ask' ||
+			value === 'delete_if_unreferenced' ||
+			value === 'move_to_recycle' ||
+			value === 'keep'
+		) {
+			return value;
+		}
+		return null;
+	}
+	// Native field options rarely set; inherit defaults when null
+	if (value === 'delete_if_unreferenced' || value === 'move_to_recycle' || value === 'keep') return value;
+	return null;
+}
+
+function parseItemDeleteOption(value: unknown): FileLifecycleItemDeleteAction | null {
+	if (value === 'delete_if_unreferenced' || value === 'move_to_recycle' || value === 'keep') return value;
+	return null;
+}
 
 async function loadFieldLifecycleMap(database: any): Promise<Map<string, FieldLifecycleOptions>> {
 	const rows = await database('directus_fields').select('collection', 'field', 'interface', 'options');
@@ -61,21 +89,10 @@ async function loadFieldLifecycleMap(database: any): Promise<Map<string, FieldLi
 			options = {};
 		}
 
-		const onDeselect = options.onDeselect;
-		const onItemDelete = options.onItemDelete;
-
 		map.set(`${row.collection}.${row.field}`, {
 			kind,
-			onDeselect:
-				kind === 'storage_manager' &&
-				(onDeselect === 'ask' || onDeselect === 'delete_if_unreferenced' || onDeselect === 'keep')
-					? onDeselect
-					: null, // inherit / missing → File Interfaces storage_manager default
-			onItemDelete:
-				kind === 'storage_manager' &&
-				(onItemDelete === 'keep' || onItemDelete === 'delete_if_unreferenced')
-					? onItemDelete
-					: null, // inherit / missing → File Interfaces storage_manager default
+			onDeselect: parseDeselectOption(kind, options.onDeselect),
+			onItemDelete: parseItemDeleteOption(options.onItemDelete),
 		});
 	}
 
@@ -89,9 +106,10 @@ function resolveDeselectPolicy(
 	if (fieldOpts?.kind === 'storage_manager') {
 		return fieldOpts.onDeselect ?? lifecycle.storage_manager.on_deselect;
 	}
-	// Native (or unknown file relation): no Ask
-	const policy = lifecycle.native.on_deselect;
-	return policy === 'delete_if_unreferenced' ? policy : 'keep';
+	if (fieldOpts?.kind === 'native' && fieldOpts.onDeselect) {
+		return fieldOpts.onDeselect === 'ask' ? 'keep' : fieldOpts.onDeselect;
+	}
+	return lifecycle.native.on_deselect;
 }
 
 function resolveItemDeletePolicy(
@@ -101,7 +119,22 @@ function resolveItemDeletePolicy(
 	if (fieldOpts?.kind === 'storage_manager') {
 		return fieldOpts.onItemDelete ?? lifecycle.storage_manager.on_item_delete;
 	}
+	if (fieldOpts?.kind === 'native' && fieldOpts.onItemDelete) {
+		return fieldOpts.onItemDelete;
+	}
 	return lifecycle.native.on_item_delete;
+}
+
+function addPendingId(bucket: PendingCleanup, policy: string, id: string) {
+	if (policy === 'delete_if_unreferenced') bucket.deleteIds.push(id);
+	else if (policy === 'move_to_recycle') bucket.recycleIds.push(id);
+}
+
+function uniquePending(bucket: PendingCleanup): PendingCleanup {
+	return {
+		deleteIds: [...new Set(bucket.deleteIds)],
+		recycleIds: [...new Set(bucket.recycleIds)],
+	};
 }
 
 function extractFileIdsFromValue(value: unknown): string[] {
@@ -213,13 +246,46 @@ export function registerFileLifecycleHooks(
 ): void {
 	const { database, services, getSchema, logger } = ctx;
 
-	/** collection+keys → pending file ids to try-delete after item delete */
-	const pendingItemDeleteFiles = new Map<string, string[]>();
+	/** collection+keys → pending file ids to try-delete / recycle after item delete */
+	const pendingItemDeleteFiles = new Map<string, PendingCleanup>();
 	/** collection+keys → file ids cleared on update */
-	const pendingUpdateClears = new Map<string, string[]>();
+	const pendingUpdateClears = new Map<string, PendingCleanup>();
 
 	function pendingKey(collection: string, keys: string[]): string {
 		return `${collection}::${[...keys].map(String).sort().join(',')}`;
+	}
+
+	async function runPendingCleanup(bucket: PendingCleanup | undefined) {
+		if (!bucket) return;
+		const pending = uniquePending(bucket);
+		if (!pending.deleteIds.length && !pending.recycleIds.length) return;
+
+		const settings = await loadSettings(database);
+		const lifecycle = normalizeLifecycleSettings(settings.lifecycle ?? LIFECYCLE_DEFAULTS);
+		const schema = await getSchema();
+
+		if (pending.deleteIds.length) {
+			await deleteUnreferencedFiles(database, schema, services, { admin: true }, pending.deleteIds, {
+				scanTextFields: lifecycle.scan_text_fields,
+				logger,
+			});
+		}
+
+		if (pending.recycleIds.length) {
+			const { moveFilesToRecycleIfUnreferenced } = await import('../endpoint/recycle');
+			await moveFilesToRecycleIfUnreferenced(
+				{
+					database,
+					env: {},
+					services,
+					getSchema,
+					accountability: { admin: true },
+					logger,
+				},
+				pending.recycleIds,
+				{ scanTextFields: lifecycle.scan_text_fields },
+			);
+		}
 	}
 
 	filter('items.delete', async (payload: string[] | number[], meta: { collection?: string }) => {
@@ -260,7 +326,7 @@ export function registerFileLifecycleHooks(
 			if (!keys.length) return payload;
 
 			const pk = schema.collections?.[collection]?.primary || 'id';
-			const toDelete = new Set<string>();
+			const bucket: PendingCleanup = { deleteIds: [], recycleIds: [] };
 
 			if (directRels.length) {
 				const rows = await database(collection).select('*').whereIn(pk, keys);
@@ -268,8 +334,8 @@ export function registerFileLifecycleHooks(
 					for (const rel of directRels) {
 						const fieldOpts = fieldMap.get(`${collection}.${rel.field}`);
 						const policy = resolveItemDeletePolicy(fieldOpts, lifecycle);
-						if (policy !== 'delete_if_unreferenced') continue;
-						for (const id of extractFileIdsFromValue(row[rel.field])) toDelete.add(id);
+						if (!isCleanupLifecyclePolicy(policy)) continue;
+						for (const id of extractFileIdsFromValue(row[rel.field])) addPendingId(bucket, policy, id);
 					}
 				}
 			}
@@ -278,7 +344,7 @@ export function registerFileLifecycleHooks(
 			for (const m2m of m2mOnParent) {
 				const fieldOpts = fieldMap.get(`${collection}.${m2m.parentField}`);
 				const policy = resolveItemDeletePolicy(fieldOpts, lifecycle);
-				if (policy !== 'delete_if_unreferenced') continue;
+				if (!isCleanupLifecyclePolicy(policy)) continue;
 				const scan = junctionScans.find((j) => j.table === m2m.junctionTable && j.fileField === m2m.fileField);
 				if (!scan) continue;
 				try {
@@ -287,7 +353,7 @@ export function registerFileLifecycleHooks(
 						.whereIn(scan.parentField, keys)
 						.whereNotNull(scan.fileField);
 					for (const row of rows) {
-						for (const id of extractFileIdsFromValue(row[scan.fileField])) toDelete.add(id);
+						for (const id of extractFileIdsFromValue(row[scan.fileField])) addPendingId(bucket, policy, id);
 					}
 				} catch (err: any) {
 					logger.warn(
@@ -297,7 +363,8 @@ export function registerFileLifecycleHooks(
 			}
 
 			// Fallback: junctions with no resolvable parent M2M field — use native item-delete default
-			if (!m2mOnParent.length && junctionScans.length && lifecycle.native.on_item_delete === 'delete_if_unreferenced') {
+			if (!m2mOnParent.length && junctionScans.length && isCleanupLifecyclePolicy(lifecycle.native.on_item_delete)) {
+				const policy = lifecycle.native.on_item_delete;
 				for (const scan of junctionScans) {
 					try {
 						const rows = await database(scan.table)
@@ -305,7 +372,7 @@ export function registerFileLifecycleHooks(
 							.whereIn(scan.parentField, keys)
 							.whereNotNull(scan.fileField);
 						for (const row of rows) {
-							for (const id of extractFileIdsFromValue(row[scan.fileField])) toDelete.add(id);
+							for (const id of extractFileIdsFromValue(row[scan.fileField])) addPendingId(bucket, policy, id);
 						}
 					} catch (err: any) {
 						logger.warn(
@@ -315,8 +382,9 @@ export function registerFileLifecycleHooks(
 				}
 			}
 
-			if (toDelete.size) {
-				pendingItemDeleteFiles.set(pendingKey(collection, keys), Array.from(toDelete));
+			const pending = uniquePending(bucket);
+			if (pending.deleteIds.length || pending.recycleIds.length) {
+				pendingItemDeleteFiles.set(pendingKey(collection, keys), pending);
 			}
 		} catch (err: any) {
 			logger.warn(`[storage-manager] lifecycle items.delete capture failed: ${err?.message || err}`);
@@ -329,17 +397,9 @@ export function registerFileLifecycleHooks(
 			const collection = String(meta?.collection || '');
 			const keys = (meta.keys ?? meta.payload ?? (meta.key ? [meta.key] : [])).map(String);
 			const mapKey = pendingKey(collection, keys);
-			const ids = pendingItemDeleteFiles.get(mapKey);
+			const bucket = pendingItemDeleteFiles.get(mapKey);
 			pendingItemDeleteFiles.delete(mapKey);
-			if (!ids?.length) return;
-
-			const settings = await loadSettings(database);
-			const lifecycle = normalizeLifecycleSettings(settings.lifecycle ?? LIFECYCLE_DEFAULTS);
-			const schema = await getSchema();
-			await deleteUnreferencedFiles(database, schema, services, { admin: true }, ids, {
-				scanTextFields: lifecycle.scan_text_fields,
-				logger,
-			});
+			await runPendingCleanup(bucket);
 		} catch (err: any) {
 			logger.warn(`[storage-manager] lifecycle items.delete cleanup failed: ${err?.message || err}`);
 		}
@@ -374,7 +434,7 @@ export function registerFileLifecycleHooks(
 			if (!keys.length) return payload;
 
 			const pk = schema.collections?.[collection]?.primary || 'id';
-			const toDelete = new Set<string>();
+			const bucket: PendingCleanup = { deleteIds: [], recycleIds: [] };
 
 			// M2O file / image columns on this collection
 			const touchedDirect = directRels.filter((r) => Object.prototype.hasOwnProperty.call(payload, r.field));
@@ -387,15 +447,15 @@ export function registerFileLifecycleHooks(
 					for (const rel of touchedDirect) {
 						const fieldOpts = fieldMap.get(`${collection}.${rel.field}`);
 						const policy = resolveDeselectPolicy(fieldOpts, lifecycle);
-						// Auto-delete on clear only when policy is delete_if_unreferenced (ask is UI-only)
-						if (policy !== 'delete_if_unreferenced') continue;
+						// Auto cleanup on clear only for delete/recycle (ask is UI-only)
+						if (!isCleanupLifecyclePolicy(policy)) continue;
 
 						const nextVal = payload[rel.field];
 						const prevIds = extractFileIdsFromValue(row[rel.field]);
 						const nextIds = new Set(extractFileIdsFromValue(nextVal));
 
 						for (const id of prevIds) {
-							if (!nextIds.has(id)) toDelete.add(id);
+							if (!nextIds.has(id)) addPendingId(bucket, policy, id);
 						}
 					}
 				}
@@ -407,7 +467,7 @@ export function registerFileLifecycleHooks(
 
 				const fieldOpts = fieldMap.get(`${collection}.${m2m.parentField}`);
 				const policy = resolveDeselectPolicy(fieldOpts, lifecycle);
-				if (policy !== 'delete_if_unreferenced') continue;
+				if (!isCleanupLifecyclePolicy(policy)) continue;
 
 				const nested = payload[m2m.parentField];
 				const deleteKeys = Array.isArray(nested?.delete) ? nested.delete.map(String).filter(Boolean) : [];
@@ -419,7 +479,7 @@ export function registerFileLifecycleHooks(
 						.whereIn(m2m.junctionPk, deleteKeys)
 						.whereNotNull(m2m.fileField);
 					for (const row of rows) {
-						for (const id of extractFileIdsFromValue(row[m2m.fileField])) toDelete.add(id);
+						for (const id of extractFileIdsFromValue(row[m2m.fileField])) addPendingId(bucket, policy, id);
 					}
 				} catch (err: any) {
 					logger.warn(
@@ -428,8 +488,9 @@ export function registerFileLifecycleHooks(
 				}
 			}
 
-			if (toDelete.size) {
-				pendingUpdateClears.set(pendingKey(collection, keys), Array.from(toDelete));
+			const pending = uniquePending(bucket);
+			if (pending.deleteIds.length || pending.recycleIds.length) {
+				pendingUpdateClears.set(pendingKey(collection, keys), pending);
 			}
 		} catch (err: any) {
 			logger.warn(`[storage-manager] lifecycle items.update capture failed: ${err?.message || err}`);
@@ -442,25 +503,9 @@ export function registerFileLifecycleHooks(
 			const collection = String(meta?.collection || '');
 			const keys = (meta.keys ?? (meta.key ? [meta.key] : [])).map(String);
 			const mapKey = pendingKey(collection, keys);
-			const ids = pendingUpdateClears.get(mapKey);
+			const bucket = pendingUpdateClears.get(mapKey);
 			pendingUpdateClears.delete(mapKey);
-			if (!ids?.length) return;
-
-			const settings = await loadSettings(database);
-			const lifecycle = normalizeLifecycleSettings(settings.lifecycle ?? LIFECYCLE_DEFAULTS);
-			const schema = await getSchema();
-			const results = await deleteUnreferencedFiles(database, schema, services, { admin: true }, ids, {
-				scanTextFields: lifecycle.scan_text_fields,
-				logger,
-			});
-			const failed = results.filter((r) => r.status === 'failed');
-			if (failed.length) {
-				logger.warn(
-					`[storage-manager] lifecycle items.update cleanup: ${failed.length} failed — ${failed
-						.map((r) => `${r.id}:${r.reason || 'error'}`)
-						.join(', ')}`,
-				);
-			}
+			await runPendingCleanup(bucket);
 		} catch (err: any) {
 			logger.warn(`[storage-manager] lifecycle items.update cleanup failed: ${err?.message || err}`);
 		}

@@ -162,11 +162,16 @@ export const STORAGE_FOLDER_KEEP = '.keep';
 export type StorageBrowseFolder = {
 	name: string;
 	path: string;
+	/** Virtual Recycle Bin folder — files are not stored under this prefix. */
+	virtual?: boolean;
 };
 
 export type StorageBrowseResponse = {
 	path: string;
 	folders: StorageBrowseFolder[];
+	/** Current path is the virtual Recycle folder for this storage. */
+	virtual_recycle?: boolean;
+	recycle_folder_id?: string;
 };
 
 /** Nested physical folder node for left-nav tree (and similar UIs). */
@@ -176,6 +181,7 @@ export type StorageFolderNode = {
 	children?: StorageFolderNode[];
 	/** Set after the first expand attempt (even when children is []). */
 	childrenLoaded?: boolean;
+	virtual?: boolean;
 };
 
 export const STORAGE_MANAGER_LOCATION_DEFAULTS: StorageLocationSettings = {

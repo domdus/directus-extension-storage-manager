@@ -26,7 +26,7 @@ export type UnreferencedScanSession = {
 	createdAt: number;
 	fileId?: string;
 	/** In-memory only — recomputed after reload. */
-	filterCache?: { key: string; ids: string[] };
+	filterCache?: { key: string; ids: string[]; bytes?: number };
 };
 
 export type UnreferencedScanSessionContext = {
@@ -283,6 +283,18 @@ export async function removeIdsFromUnreferencedScanSession(
 	const session = await getUnreferencedScanSession(ctx, scanId);
 	if (!session) return 0;
 
+	const removed = applyRemovedIdsToUnreferencedScanSession(session, removeIds);
+	if (!removed) return 0;
+
+	await persistUnreferencedScanSession(ctx, session);
+	return removed;
+}
+
+/** Mutate in-memory session only (caller persists). */
+export function applyRemovedIdsToUnreferencedScanSession(
+	session: UnreferencedScanSession,
+	removeIds: string[],
+): number {
 	const drop = new Set(removeIds.map(String));
 	const before = session.ids.length;
 	session.ids = session.ids.filter((id) => !drop.has(id));
@@ -292,11 +304,18 @@ export async function removeIdsFromUnreferencedScanSession(
 	session.meta.unreferenced_count = Math.max(0, session.meta.unreferenced_count - removed);
 	if (session.filterCache) {
 		session.filterCache = {
-			...session.filterCache,
+			key: session.filterCache.key,
 			ids: session.filterCache.ids.filter((id) => !drop.has(id)),
 		};
 	}
+	return removed;
+}
 
+/** Rewrite the scan JSON snapshot from the in-memory session (ids already mutated). */
+export async function persistUnreferencedScanSession(
+	ctx: UnreferencedScanSessionContext,
+	session: UnreferencedScanSession,
+): Promise<void> {
 	const folderId = await ensureUnreferencedScanFolder(ctx);
 	const schema = await ctx.getSchema();
 	const service = filesService(ctx, schema);
@@ -310,7 +329,6 @@ export async function removeIdsFromUnreferencedScanSession(
 
 	session.fileId = await uploadSessionJson(ctx, folderId, session);
 	memory.set(session.id, session);
-	return removed;
 }
 
 export async function clearUnreferencedScanSession(

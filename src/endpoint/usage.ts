@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getDriverMeta, parseStorageLocations } from '../shared/drivers';
 import type { StorageLocationInfo, StorageUsage } from '../shared/types';
+import { excludeRecycleFolderFromFilesQuery } from './recycle';
 
 type EnvLike = Record<string, unknown>;
 
@@ -99,7 +100,7 @@ export async function aggregateFileUsageGrouped(
 	}
 	if (!locations.length) return map;
 
-	const rows = await database('directus_files')
+	const query = database('directus_files')
 		.whereIn('storage', locations)
 		.select('storage')
 		.select(
@@ -107,6 +108,8 @@ export async function aggregateFileUsageGrouped(
 			database.raw('coalesce(sum(filesize), 0) as total_bytes'),
 		)
 		.groupBy('storage');
+	await excludeRecycleFolderFromFilesQuery(database, query);
+	const rows = await query;
 
 	for (const row of rows || []) {
 		map.set(String(row.storage), {

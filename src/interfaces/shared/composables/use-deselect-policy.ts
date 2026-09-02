@@ -1,7 +1,20 @@
 import { useApi } from '@directus/extensions-sdk';
 import { computed, onMounted, ref, type Ref } from 'vue';
 
-export type DeselectPolicy = 'keep' | 'ask' | 'delete_if_unreferenced';
+export type DeselectPolicy = 'keep' | 'ask' | 'delete_if_unreferenced' | 'move_to_recycle';
+
+const POLICY_VALUES = new Set<DeselectPolicy>([
+	'keep',
+	'ask',
+	'delete_if_unreferenced',
+	'move_to_recycle',
+]);
+
+function asPolicy(value: unknown): DeselectPolicy | null {
+	return typeof value === 'string' && POLICY_VALUES.has(value as DeselectPolicy)
+		? (value as DeselectPolicy)
+		: null;
+}
 
 /**
  * Resolves On Deselect: field option wins; `inherit` / empty uses
@@ -14,10 +27,8 @@ export function useDeselectPolicy(localPolicy: Ref<string | undefined>) {
 	onMounted(async () => {
 		try {
 			const res = await api.get('/storage-manager/settings');
-			const value = res.data?.data?.lifecycle?.storage_manager?.on_deselect;
-			if (value === 'ask' || value === 'delete_if_unreferenced' || value === 'keep') {
-				globalPolicy.value = value;
-			}
+			const value = asPolicy(res.data?.data?.lifecycle?.storage_manager?.on_deselect);
+			if (value) globalPolicy.value = value;
 		} catch {
 			/* keep default */
 		}
@@ -26,8 +37,7 @@ export function useDeselectPolicy(localPolicy: Ref<string | undefined>) {
 	const effectiveDeselect = computed<DeselectPolicy>(() => {
 		const local = localPolicy.value;
 		if (!local || local === 'inherit') return globalPolicy.value;
-		if (local === 'ask' || local === 'delete_if_unreferenced' || local === 'keep') return local;
-		return globalPolicy.value;
+		return asPolicy(local) ?? globalPolicy.value;
 	});
 
 	return { effectiveDeselect };

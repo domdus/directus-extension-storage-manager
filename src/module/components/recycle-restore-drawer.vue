@@ -1,27 +1,34 @@
 <template>
 	<v-drawer
 		:model-value="modelValue"
-		title="Unreferenced Scan"
-		icon="radar"
+		:title="drawerTitle"
+		icon="undo"
 		persistent
 		@update:model-value="onDrawerToggle"
 		@cancel="close"
 	>
+		<template #actions>
+			<template v-if="!jobRunning && !localResult && !localError">
+				<v-button v-tooltip.bottom="confirmLabel" icon rounded :loading="starting || jobRunning" @click="submit">
+					<v-icon name="check" />
+				</v-button>
+			</template>
+		</template>
+
 		<div class="drawer-body">
-			<p class="intro">
-				Scanning the File Library for entries with no remaining references.
-			</p>
+			<p class="intro">{{ introText }}</p>
+			<p v-if="!jobRunning && !localResult && !localError" class="description">{{ descriptionText }}</p>
 
 			<v-notice v-if="jobRunning && jobBackgrounded" type="info">
-				Scan continues in the background. You can close this drawer and navigate elsewhere in Studio.
+				Restore continues in the background. You can close this drawer and navigate elsewhere in Studio.
 			</v-notice>
 
 			<v-notice v-else-if="otherJobRunning" type="warning">
-				Another scan is already running in the background. Wait for it to finish or cancel it from the
+				Another restore is already running in the background. Wait for it to finish or cancel it from the
 				progress toast.
 			</v-notice>
 
-			<div v-if="(jobRunning && !jobBackgrounded) || localResult || localError" class="progress-panel">
+			<div v-if="showProgress" class="progress-panel">
 				<div class="phase-line">
 					<span class="phase">{{ phaseLabel }}</span>
 					<span class="elapsed">{{ formatDuration(displayElapsed) }}</span>
@@ -47,8 +54,8 @@
 				</div>
 
 				<div class="counts">
-					<span>Used ≈ {{ progress.used_count.toLocaleString() }}</span>
-					<span>Unreferenced {{ progress.unreferenced_count.toLocaleString() }}</span>
+					<span>Restored {{ progress.restored.toLocaleString() }}</span>
+					<span v-if="progress.failed">Failed {{ progress.failed.toLocaleString() }}</span>
 				</div>
 			</div>
 
@@ -56,26 +63,38 @@
 				<v-button secondary class="background-btn" @click="detachToBackground">
 					Run in Background
 				</v-button>
-				<v-button kind="danger" secondary class="background-btn" @click="cancelScan">
-					Cancel Scan
+				<v-button kind="danger" secondary class="background-btn" @click="cancelRestore">
+					Cancel Restore
 				</v-button>
 				<p class="note">
 					Closing this drawer also runs in the background. Click the progress toast anytime for details.
 				</p>
 			</div>
 
+			<div v-else-if="!jobRunning && !localResult && !localError && !otherJobRunning" class="background-actions">
+				<v-button :loading="starting || jobRunning" @click="submit">{{ confirmLabel }}</v-button>
+			</div>
+
 			<div v-if="localResult" class="result">
-				<v-notice type="success" icon="check_circle">
-					Scan complete —
-					<strong>{{ localResult.unreferenced_count.toLocaleString() }}</strong> unreferenced
-					<span v-if="localResult.unreferenced_bytes != null">
-						· {{ formatBytes(localResult.unreferenced_bytes) }}
-					</span>
-					of {{ localResult.total_files.toLocaleString() }} files
-					({{ formatDuration(localResult.elapsed_ms) }}).
+				<v-notice :type="localResult.cancelled ? 'warning' : 'success'" :icon="localResult.cancelled ? 'cancel' : 'check_circle'">
+					<template v-if="localResult.cancelled">
+						Cancelled —
+						<strong>{{ localResult.restored.toLocaleString() }}</strong>
+						of {{ localResult.total.toLocaleString() }} restored
+					</template>
+					<template v-else>
+						Restored
+						<strong>{{ localResult.restored.toLocaleString() }}</strong>
+						file{{ localResult.restored === 1 ? '' : 's' }}
+						to the File Library root
+						<template v-if="localResult.failed">
+							· {{ localResult.failed.toLocaleString() }} failed
+						</template>
+						({{ formatDuration(progress.elapsed_ms) }}).
+					</template>
 				</v-notice>
 				<div class="result-actions">
-					<v-button @click="applyAndClose">View Results</v-button>
+					<v-button @click="applyAndClose">Done</v-button>
 				</div>
 			</div>
 
@@ -92,19 +111,22 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { formatBytes, formatDuration } from '../../shared/format';
+import { formatDuration } from '../../shared/format';
 import {
-	useUnreferencedScanJob,
-	type UnreferencedScanMeta,
-} from '../composables/use-unreferenced-scan-job';
+	useRecycleRestoreJob,
+	type RecycleRestoreResult,
+} from '../composables/use-recycle-restore-job';
 
 const props = defineProps<{
 	modelValue: boolean;
+	/** Limit restore to one storage adapter. Omit / null = entire Recycle Bin. */
+	storage?: string | null;
+	estimatedCount?: number;
 }>();
 
 const emit = defineEmits<{
 	(e: 'update:modelValue', value: boolean): void;
-	(e: 'done', meta: UnreferencedScanMeta): void;
+	(e: 'done', result: RecycleRestoreResult): void;
 }>();
 
 const route = useRoute();
@@ -118,60 +140,87 @@ const {
 	errorMessage,
 	reopenNonce,
 	returnToPath,
+	start,
 	runInBackground,
 	attachForeground,
 	cancel,
 	clearLastResult,
-} = useUnreferencedScanJob();
+} = useRecycleRestoreJob();
 
-const localResult = ref<UnreferencedScanMeta | null>(null);
+const localResult = ref<RecycleRestoreResult | null>(null);
 const localError = ref<string | null>(null);
 const ownsForeground = ref(false);
+const starting = ref(false);
 
 const otherJobRunning = computed(
 	() => jobRunning.value && !ownsForeground.value && !jobBackgrounded.value && !props.modelValue,
 );
 
+const drawerTitle = computed(() =>
+	props.storage ? `Restore All on ${props.storage}` : 'Restore All from Recycle',
+);
+
+const confirmLabel = computed(() => {
+	const n = Number(props.estimatedCount) || 0;
+	if (n > 0) return `Restore ${n.toLocaleString()}`;
+	return 'Restore All';
+});
+
+const introText = computed(() => {
+	const n = Number(props.estimatedCount) || 0;
+	const count = n > 0 ? ` — ${n.toLocaleString()} file${n === 1 ? '' : 's'}` : '';
+	if (props.storage) {
+		return `Restore every Recycle file on ${props.storage}${count} to the File Library root.`;
+	}
+	return `Restore every file in Recycle Bin${count} to the File Library root.`;
+});
+
+const descriptionText = computed(() => {
+	const scope = props.storage
+		? `All Recycle files on ${props.storage} — not only the current page or filters.`
+		: 'The entire Recycle Bin — not only the current page.';
+	return `${scope} Objects stay at their original storage keys. Folder and trash stamp are cleared. Thumbnails were removed when files went into Recycle and regenerate on the next request.`;
+});
+
 const displayMessage = computed(() => {
 	if (localError.value) return localError.value;
-	if (localResult.value) return 'Scan complete';
+	if (localResult.value) {
+		return localResult.value.cancelled ? 'Restore cancelled' : 'Restore complete';
+	}
 	return progress.message;
 });
 
-const displayElapsed = computed(() => {
-	if (localResult.value) return localResult.value.elapsed_ms;
-	return progress.elapsed_ms;
-});
+const displayElapsed = computed(() => progress.elapsed_ms);
 
 const phaseLabel = computed(() => {
 	switch (progress.phase) {
-		case 'relations':
-			return 'Relations';
-		case 'text':
-			return 'Text fields';
-		case 'files':
-			return 'File Library';
-		case 'finalize':
-			return 'Finalizing';
+		case 'prepare':
+			return 'Preparing';
+		case 'restore':
+			return 'Restoring';
 		case 'done':
 			return 'Done';
 		case 'error':
 			return 'Error';
 		default:
-			return 'Scan';
+			return 'Restore';
 	}
 });
 
-const scanFinished = computed(
+const restoreFinished = computed(
 	() => Boolean(localResult.value) || progress.phase === 'done' || progress.phase === 'error',
 );
 
+const showProgress = computed(
+	() => (jobRunning.value && !jobBackgrounded.value) || Boolean(localResult.value) || Boolean(localError.value),
+);
+
 const hasDeterminateProgress = computed(
-	() => scanFinished.value || (progress.total > 0 && progress.phase !== 'idle'),
+	() => restoreFinished.value || (progress.total > 0 && progress.phase !== 'idle'),
 );
 
 const percent = computed(() => {
-	if (scanFinished.value) return 100;
+	if (restoreFinished.value) return 100;
 	if (progress.total <= 0) return 0;
 	return Math.max(0, Math.min(100, (progress.current / progress.total) * 100));
 });
@@ -188,9 +237,9 @@ function onDrawerToggle(open: boolean) {
 
 function detachToBackground() {
 	runInBackground({
-		returnTo: String(route.fullPath || '/storage-manager/unreferenced'),
+		returnTo: String(route.fullPath || '/storage-manager/recycle'),
 		navigate: () => {
-			const path = returnToPath.value || '/storage-manager/unreferenced';
+			const path = returnToPath.value || '/storage-manager/recycle';
 			if (route.fullPath !== path) router.push(path);
 			emit('update:modelValue', true);
 		},
@@ -199,8 +248,43 @@ function detachToBackground() {
 	emit('update:modelValue', false);
 }
 
-function cancelScan() {
+function cancelRestore() {
 	cancel();
+}
+
+async function submit() {
+	if (jobRunning.value || starting.value) return;
+	starting.value = true;
+	localResult.value = null;
+	localError.value = null;
+	try {
+		const data = await start(
+			{ storage: props.storage ?? null },
+			{
+				listener: {
+					onDone: (meta) => {
+						localResult.value = meta;
+						localError.value = null;
+					},
+					onError: (err) => {
+						localError.value = err.message;
+						localResult.value = null;
+					},
+					onCancel: (partial) => {
+						localResult.value = partial;
+						localError.value = partial ? null : 'Restore cancelled';
+					},
+				},
+			},
+		);
+		if (data) localResult.value = data;
+	} catch (err: any) {
+		if (err?.name !== 'AbortError') {
+			localError.value = err?.message || 'Restore failed';
+		}
+	} finally {
+		starting.value = false;
+	}
 }
 
 function applyAndClose() {
@@ -236,9 +320,9 @@ watch(
 				localError.value = err.message;
 				localResult.value = null;
 			},
-			onCancel: () => {
-				localError.value = 'Scan cancelled';
-				localResult.value = null;
+			onCancel: (partial) => {
+				localResult.value = partial;
+				localError.value = partial ? null : 'Restore cancelled';
 			},
 		});
 		if (jobResult.value && !jobRunning.value) {
@@ -267,9 +351,15 @@ watch(jobResult, (meta) => {
 }
 
 .intro {
-	margin: 0 0 1rem;
+	margin: 0 0 0.75rem;
 	line-height: 1.45;
 	color: var(--theme--foreground);
+}
+
+.description {
+	margin: 0 0 1rem;
+	line-height: 1.45;
+	color: var(--theme--foreground-subdued);
 }
 
 .progress-panel {
@@ -334,10 +424,10 @@ watch(jobResult, (meta) => {
 
 .bar-fill.indeterminate {
 	width: 35%;
-	animation: scan-indeterminate 1.2s ease-in-out infinite;
+	animation: restore-indeterminate 1.2s ease-in-out infinite;
 }
 
-@keyframes scan-indeterminate {
+@keyframes restore-indeterminate {
 	0% {
 		transform: translateX(-120%);
 	}

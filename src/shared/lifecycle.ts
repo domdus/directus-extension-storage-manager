@@ -1,7 +1,7 @@
-export type FileLifecycleDeselectAction = 'keep' | 'ask' | 'delete_if_unreferenced';
-export type FileLifecycleItemDeleteAction = 'keep' | 'delete_if_unreferenced';
-/** Native interfaces have no Ask prompt — only keep or auto-delete. */
-export type FileLifecycleNativeDeselectAction = 'keep' | 'delete_if_unreferenced';
+export type FileLifecycleDeselectAction = 'keep' | 'ask' | 'delete_if_unreferenced' | 'move_to_recycle';
+export type FileLifecycleItemDeleteAction = 'keep' | 'delete_if_unreferenced' | 'move_to_recycle';
+/** Native interfaces have no Ask prompt — keep, auto-delete, or recycle. */
+export type FileLifecycleNativeDeselectAction = 'keep' | 'delete_if_unreferenced' | 'move_to_recycle';
 
 export type LifecyclePolicyGroup = {
 	on_deselect: FileLifecycleDeselectAction;
@@ -48,21 +48,31 @@ export const LIFECYCLE_DEFAULTS: StorageManagerLifecycleSettings = {
 };
 
 function coerceDeselect(value: unknown): FileLifecycleDeselectAction {
-	return value === 'ask' || value === 'delete_if_unreferenced' || value === 'keep'
+	return value === 'ask' ||
+		value === 'delete_if_unreferenced' ||
+		value === 'move_to_recycle' ||
+		value === 'keep'
 		? value
 		: LIFECYCLE_DEFAULTS.storage_manager.on_deselect;
 }
 
 function coerceNativeDeselect(value: unknown): FileLifecycleNativeDeselectAction {
-	if (value === 'delete_if_unreferenced' || value === 'keep') return value;
+	if (value === 'delete_if_unreferenced' || value === 'move_to_recycle' || value === 'keep') return value;
 	// Legacy "ask" (or anything else) → keep for native (no prompt UI)
 	return LIFECYCLE_DEFAULTS.native.on_deselect;
 }
 
 function coerceItemDelete(value: unknown): FileLifecycleItemDeleteAction {
-	return value === 'delete_if_unreferenced' || value === 'keep'
+	return value === 'delete_if_unreferenced' || value === 'move_to_recycle' || value === 'keep'
 		? value
 		: LIFECYCLE_DEFAULTS.native.on_item_delete;
+}
+
+/** Policies that remove the file from normal library use after clear/delete. */
+export function isCleanupLifecyclePolicy(
+	policy: string | null | undefined,
+): policy is 'delete_if_unreferenced' | 'move_to_recycle' {
+	return policy === 'delete_if_unreferenced' || policy === 'move_to_recycle';
 }
 
 export function normalizeLifecycleSettings(raw: unknown): StorageManagerLifecycleSettings {

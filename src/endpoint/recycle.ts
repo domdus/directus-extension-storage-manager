@@ -5,6 +5,7 @@ import {
 	RECYCLE_PURGE_FLOW_NAME,
 	RECYCLE_TRASHED_AT_FIELD,
 	normalizeRecycleSettings,
+	recycleStorageFolderName,
 	type RecycleSettings,
 } from '../shared/recycle';
 import {
@@ -44,6 +45,47 @@ export async function resolveRecycleFolderId(database: any): Promise<string | nu
 	const id = recycle.enabled ? recycle.folder_id : null;
 	setCachedRecycleFolderId(id);
 	return id;
+}
+
+export async function resolveRecycleFolderMeta(
+	database: any,
+): Promise<{ id: string; name: string } | null> {
+	const id = await resolveRecycleFolderId(database);
+	if (!id) return null;
+	const row = await database('directus_folders').select('id', 'name').where({ id }).first();
+	if (!row?.id) return null;
+	return { id: String(row.id), name: recycleStorageFolderName(row.name) };
+}
+
+async function storageHasRecycleFiles(database: any, location: string, folderId: string): Promise<boolean> {
+	const row = await database('directus_files')
+		.where({ folder: folderId, storage: location })
+		.count({ n: '*' })
+		.first();
+	return (Number(row?.n ?? row?.['count(*)'] ?? 0) || 0) > 0;
+}
+
+/** Virtual Recycle folder on a storage browse view, if this adapter has quarantined files. */
+export async function getVirtualRecycleBrowseFolder(
+	database: any,
+	location: string,
+): Promise<{ id: string; name: string } | null> {
+	const meta = await resolveRecycleFolderMeta(database);
+	if (!meta) return null;
+	if (!(await storageHasRecycleFiles(database, location, meta.id))) return null;
+	return meta;
+}
+
+/**
+ * Drop Recycle Bin files from a `directus_files` query. Keeps unfiled rows (`folder` IS NULL).
+ * Mutates `query` in place — do not return the builder from this async function (Knex is thenable).
+ */
+export async function excludeRecycleFolderFromFilesQuery(database: any, query: any): Promise<void> {
+	const recycleId = await resolveRecycleFolderId(database);
+	if (!recycleId) return;
+	query.where(function (this: any) {
+		this.whereNull('folder').orWhere('folder', '<>', recycleId);
+	});
 }
 
 export async function ensureTrashedAtField(ctx: RecycleContext, field = RECYCLE_TRASHED_AT_FIELD): Promise<void> {
@@ -347,28 +389,53 @@ export async function removeRecyclePurgeFlow(ctx: RecycleContext): Promise<void>
 	});
 }
 
+const TRANSFORM_DELETE_CONCURRENCY = 8;
+
+type TransformFileRow = { id: string; storage: string; filename_disk: string };
+
+async function dropTransformsForRows(
+	rows: TransformFileRow[],
+	logger?: RecycleContext['logger'],
+	opts?: { concurrency?: number; isCancelled?: () => boolean },
+): Promise<number> {
+	if (!rows.length) return 0;
+	const storage = await getStorageManager();
+	const concurrency = Math.max(1, opts?.concurrency ?? TRANSFORM_DELETE_CONCURRENCY);
+	let deleted = 0;
+	let next = 0;
+
+	async function worker() {
+		while (next < rows.length) {
+			if (opts?.isCancelled?.()) return;
+			const index = next++;
+			const row = rows[index];
+			if (!row) continue;
+			try {
+				const disk = storage.location(String(row.storage));
+				deleted += await diskDeleteTransformsOnly(disk, String(row.filename_disk || ''));
+			} catch (err: any) {
+				logger?.warn?.(
+					`[storage-manager] Recycle transform cleanup failed for ${row.id}: ${err?.message || err}`,
+				);
+			}
+		}
+	}
+
+	const workers = Array.from({ length: Math.min(concurrency, rows.length) }, () => worker());
+	await Promise.all(workers);
+	return deleted;
+}
+
 async function dropTransformsForFiles(
 	database: any,
 	fileIds: string[],
 	logger?: RecycleContext['logger'],
 ): Promise<number> {
 	if (!fileIds.length) return 0;
-	const rows = await database('directus_files')
+	const rows = (await database('directus_files')
 		.select('id', 'storage', 'filename_disk')
-		.whereIn('id', fileIds);
-	const storage = await getStorageManager();
-	let deleted = 0;
-	for (const row of rows || []) {
-		try {
-			const disk = storage.location(String(row.storage));
-			deleted += await diskDeleteTransformsOnly(disk, String(row.filename_disk || ''));
-		} catch (err: any) {
-			logger?.warn?.(
-				`[storage-manager] Recycle transform cleanup failed for ${row.id}: ${err?.message || err}`,
-			);
-		}
-	}
-	return deleted;
+		.whereIn('id', fileIds)) as TransformFileRow[];
+	return dropTransformsForRows(rows || [], logger);
 }
 
 /**
@@ -401,6 +468,273 @@ export async function moveFilesToRecycle(
 	return { moved: ids.length, transforms_deleted };
 }
 
+export const RECYCLE_MOVE_CHUNK = 1000;
+
+export type RecycleBulkProgress = {
+	phase: 'prepare' | 'move' | 'done';
+	message: string;
+	current: number;
+	total: number;
+	moved: number;
+	skipped: number;
+	failed: number;
+	transforms_deleted: number;
+};
+
+export type RecycleRestoreProgress = {
+	phase: 'prepare' | 'restore' | 'done';
+	message: string;
+	current: number;
+	total: number;
+	restored: number;
+	failed: number;
+};
+
+/**
+ * Chunked Recycle move for huge ID lists (scan sessions). No per-request cap.
+ * Does not re-check references — caller already scanned.
+ */
+export async function moveFilesToRecycleBulk(
+	ctx: RecycleContext,
+	fileIds: string[],
+	opts?: {
+		isCancelled?: () => boolean;
+		onProgress?: (progress: RecycleBulkProgress) => void;
+	},
+): Promise<{
+	moved: number;
+	skipped: number;
+	failed: number;
+	transforms_deleted: number;
+	cancelled: boolean;
+	moved_ids: string[];
+}> {
+	const status = await getRecycleStatus(ctx);
+	if (!status.enabled || !status.folder_id) {
+		throw new Error('Recycle Bin is not enabled — enable it in Storage Manager settings first.');
+	}
+	if (!status.field_ready) {
+		await ensureTrashedAtField(ctx, status.field);
+	}
+
+	const ids = [...new Set(fileIds.map(String).filter(Boolean))];
+	const empty = {
+		moved: 0,
+		skipped: 0,
+		failed: 0,
+		transforms_deleted: 0,
+		cancelled: false,
+		moved_ids: [] as string[],
+	};
+	if (!ids.length) return empty;
+
+	const recycleFolderId = String(status.folder_id);
+	const now = new Date().toISOString();
+	const patch: Record<string, unknown> = {
+		folder: recycleFolderId,
+		[status.field]: now,
+	};
+
+	const report = (partial: Omit<RecycleBulkProgress, 'phase'> & { phase?: RecycleBulkProgress['phase'] }) => {
+		opts?.onProgress?.({
+			phase: partial.phase ?? 'move',
+			message: partial.message,
+			current: partial.current,
+			total: partial.total,
+			moved: partial.moved,
+			skipped: partial.skipped,
+			failed: partial.failed,
+			transforms_deleted: partial.transforms_deleted,
+		});
+	};
+
+	report({
+		phase: 'prepare',
+		message: `Preparing ${ids.length.toLocaleString()} file(s)…`,
+		current: 0,
+		total: ids.length,
+		moved: 0,
+		skipped: 0,
+		failed: 0,
+		transforms_deleted: 0,
+	});
+
+	let moved = 0;
+	let skipped = 0;
+	let failed = 0;
+	let transforms_deleted = 0;
+	const moved_ids: string[] = [];
+
+	for (let i = 0; i < ids.length; i += RECYCLE_MOVE_CHUNK) {
+		if (opts?.isCancelled?.()) {
+			return { moved, skipped, failed, transforms_deleted, cancelled: true, moved_ids };
+		}
+
+		const chunk = ids.slice(i, i + RECYCLE_MOVE_CHUNK);
+		try {
+			const rows = (await ctx.database('directus_files')
+				.select('id', 'storage', 'filename_disk', 'folder')
+				.whereIn('id', chunk)) as Array<TransformFileRow & { folder?: string | null }>;
+
+			const existing = new Map(rows.map((row) => [String(row.id), row]));
+			const toMove: TransformFileRow[] = [];
+			for (const id of chunk) {
+				const row = existing.get(id);
+				if (!row) {
+					skipped++;
+					continue;
+				}
+				if (row.folder != null && String(row.folder) === recycleFolderId) {
+					skipped++;
+					continue;
+				}
+				toMove.push(row);
+			}
+
+			if (toMove.length) {
+				const moveIds = toMove.map((row) => String(row.id));
+				await ctx.database('directus_files').whereIn('id', moveIds).update(patch);
+				moved += toMove.length;
+				moved_ids.push(...moveIds);
+				transforms_deleted += await dropTransformsForRows(toMove, ctx.logger, {
+					isCancelled: opts?.isCancelled,
+				});
+			}
+		} catch (err: any) {
+			failed += chunk.length;
+			ctx.logger?.warn?.(
+				`[storage-manager] Recycle bulk chunk failed at ${i}: ${err?.message || err}`,
+			);
+		}
+
+		report({
+			phase: 'move',
+			message: `Moved ${moved.toLocaleString()} of ${ids.length.toLocaleString()}`,
+			current: Math.min(i + chunk.length, ids.length),
+			total: ids.length,
+			moved,
+			skipped,
+			failed,
+			transforms_deleted,
+		});
+	}
+
+	report({
+		phase: 'done',
+		message: opts?.isCancelled?.()
+			? 'Cancelled'
+			: `Moved ${moved.toLocaleString()} file(s) to Recycle`,
+		current: ids.length,
+		total: ids.length,
+		moved,
+		skipped,
+		failed,
+		transforms_deleted,
+	});
+
+	return {
+		moved,
+		skipped,
+		failed,
+		transforms_deleted,
+		cancelled: Boolean(opts?.isCancelled?.()),
+		moved_ids,
+	};
+}
+
+/**
+ * Move files into Recycle when still unreferenced.
+ * If Recycle Bin is off: skip (keep files), do not fail the caller.
+ */
+export async function moveFilesToRecycleIfUnreferenced(
+	ctx: RecycleContext,
+	fileIds: string[],
+	opts?: { scanTextFields?: boolean },
+): Promise<{
+	moved: number;
+	skipped: number;
+	failed: number;
+	transforms_deleted: number;
+	recycle_disabled: boolean;
+	results: Array<{ id: string; status: 'moved' | 'skipped' | 'failed'; reason?: string }>;
+}> {
+	const status = await getRecycleStatus(ctx);
+	const ids = [...new Set(fileIds.map(String).filter(Boolean))];
+	const empty = {
+		moved: 0,
+		skipped: ids.length,
+		failed: 0,
+		transforms_deleted: 0,
+		recycle_disabled: !status.enabled || !status.folder_id,
+		results: ids.map((id) => ({
+			id,
+			status: 'skipped' as const,
+			reason: !status.enabled || !status.folder_id ? 'recycle disabled' : 'empty',
+		})),
+	};
+	if (!ids.length) {
+		return { ...empty, skipped: 0, results: [] };
+	}
+	if (!status.enabled || !status.folder_id) {
+		ctx.logger?.warn?.(
+			'[storage-manager] move_to_recycle skipped — Recycle Bin is not enabled',
+		);
+		return empty;
+	}
+
+	const settings = await loadSettings(ctx.database);
+	const lifecycle = normalizeLifecycleSettings(settings.lifecycle ?? LIFECYCLE_DEFAULTS);
+	const scanTextFields = opts?.scanTextFields ?? lifecycle.scan_text_fields;
+	const schema = await ctx.getSchema();
+	const { isFileReferenced } = await import('./unreferenced');
+
+	const toMove: string[] = [];
+	const results: Array<{ id: string; status: 'moved' | 'skipped' | 'failed'; reason?: string }> = [];
+
+	for (const rawId of ids) {
+		try {
+			const exists = await ctx.database('directus_files').select('id').where('id', rawId).first();
+			if (!exists) {
+				results.push({ id: rawId, status: 'skipped', reason: 'not found' });
+				continue;
+			}
+			const referenced = await isFileReferenced(ctx.database, schema, rawId, {
+				scanTextFields,
+				logger: ctx.logger as any,
+			});
+			if (referenced) {
+				results.push({ id: rawId, status: 'skipped', reason: 'still referenced' });
+				continue;
+			}
+			toMove.push(rawId);
+		} catch (err: any) {
+			results.push({ id: rawId, status: 'failed', reason: err?.message || String(err) });
+		}
+	}
+
+	let transforms_deleted = 0;
+	if (toMove.length) {
+		try {
+			const moved = await moveFilesToRecycle(ctx, toMove);
+			transforms_deleted = moved.transforms_deleted;
+			for (const id of toMove) results.push({ id, status: 'moved' });
+		} catch (err: any) {
+			for (const id of toMove) {
+				results.push({ id, status: 'failed', reason: err?.message || String(err) });
+			}
+		}
+	}
+
+	return {
+		moved: results.filter((r) => r.status === 'moved').length,
+		skipped: results.filter((r) => r.status === 'skipped').length,
+		failed: results.filter((r) => r.status === 'failed').length,
+		transforms_deleted,
+		recycle_disabled: false,
+		results,
+	};
+}
+
 /**
  * Restore files from recycle: clear folder + trashed_at (leave at library root).
  */
@@ -426,6 +760,115 @@ export async function restoreFilesFromRecycle(
 		.update(patch);
 
 	return { restored: Number(updated) || ids.length };
+}
+
+/**
+ * Restore every Recycle file (optional storage filter) in chunks.
+ * Does not load the full ID list into memory — re-queries remaining rows each batch.
+ */
+export async function restoreRecycleFilesBulk(
+	ctx: RecycleContext,
+	opts?: {
+		storage?: string | null;
+		isCancelled?: () => boolean;
+		onProgress?: (progress: RecycleRestoreProgress) => void;
+	},
+): Promise<{
+	restored: number;
+	failed: number;
+	total: number;
+	cancelled: boolean;
+	storage: string | null;
+}> {
+	const status = await getRecycleStatus(ctx);
+	if (!status.folder_id) throw new Error('Recycle Bin folder is not configured');
+
+	const folderId = String(status.folder_id);
+	const storage = opts?.storage ? String(opts.storage) : null;
+	const patch: Record<string, unknown> = {
+		folder: null,
+		[status.field]: null,
+	};
+
+	const scoped = () => {
+		const query = ctx.database('directus_files').where({ folder: folderId });
+		if (storage) query.andWhere({ storage });
+		return query;
+	};
+
+	const countRow = await scoped().count({ n: '*' }).first();
+	const total = Number(countRow?.n ?? countRow?.['count(*)'] ?? 0) || 0;
+
+	const report = (partial: RecycleRestoreProgress) => {
+		opts?.onProgress?.(partial);
+	};
+
+	report({
+		phase: 'prepare',
+		message:
+			total === 0
+				? 'Nothing to restore'
+				: storage
+					? `Preparing ${total.toLocaleString()} file(s) on ${storage}…`
+					: `Preparing ${total.toLocaleString()} file(s)…`,
+		current: 0,
+		total,
+		restored: 0,
+		failed: 0,
+	});
+
+	if (!total) {
+		return { restored: 0, failed: 0, total: 0, cancelled: false, storage };
+	}
+
+	let restored = 0;
+	let failed = 0;
+
+	while (true) {
+		if (opts?.isCancelled?.()) {
+			return { restored, failed, total, cancelled: true, storage };
+		}
+
+		const rows = await scoped().select('id').limit(RECYCLE_MOVE_CHUNK);
+		const ids = (rows || []).map((row: { id: string }) => String(row.id)).filter(Boolean);
+		if (!ids.length) break;
+
+		try {
+			const updated = await ctx.database('directus_files')
+				.whereIn('id', ids)
+				.andWhere({ folder: folderId })
+				.update(patch);
+			const n = Number(updated) || ids.length;
+			restored += n;
+		} catch (err: any) {
+			failed += ids.length;
+			ctx.logger?.warn?.(`[storage-manager] Recycle restore chunk failed: ${err?.message || err}`);
+			break;
+		}
+
+		report({
+			phase: 'restore',
+			message: `Restored ${restored.toLocaleString()} of ${total.toLocaleString()}`,
+			current: Math.min(restored + failed, total),
+			total,
+			restored,
+			failed,
+		});
+	}
+
+	const cancelled = Boolean(opts?.isCancelled?.());
+	report({
+		phase: 'done',
+		message: cancelled
+			? `Cancelled after ${restored.toLocaleString()} restored`
+			: `Restored ${restored.toLocaleString()} file(s)`,
+		current: total,
+		total,
+		restored,
+		failed,
+	});
+
+	return { restored, failed, total, cancelled, storage };
 }
 
 export async function purgeExpiredRecycle(

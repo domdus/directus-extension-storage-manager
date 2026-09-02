@@ -33,11 +33,12 @@ const lifecycleFieldOptions = [
 				choices: [
 					{ value: 'inherit', text: 'Use File Interfaces default' },
 					{ value: 'keep', text: 'Keep file in library' },
+					{ value: 'move_to_recycle', text: 'Move to Recycle Bin if unreferenced' },
 					{ value: 'ask', text: 'Ask (deselect only vs delete if unused)' },
 					{ value: 'delete_if_unreferenced', text: 'Delete file if unreferenced' },
 				],
 			},
-			note: 'When the file is cleared on this field. “Ask” shows a Studio prompt; delete only runs if nothing else references the file. Inherit uses Storage Manager → File Interfaces.',
+			note: 'When the file is cleared on this field. “Ask” shows a Studio prompt; delete/recycle only run if nothing else references the file. Recycle requires Recycle Bin On. Inherit uses Storage Manager → File Interfaces.',
 		},
 	},
 	{
@@ -52,10 +53,11 @@ const lifecycleFieldOptions = [
 				choices: [
 					{ value: 'inherit', text: 'Use File Interfaces default' },
 					{ value: 'keep', text: 'Keep file in library' },
+					{ value: 'move_to_recycle', text: 'Move to Recycle Bin if unreferenced' },
 					{ value: 'delete_if_unreferenced', text: 'Delete file if unreferenced' },
 				],
 			},
-			note: 'When the parent item is deleted. Only deletes the file if it is not used elsewhere (relations, /assets/ links, JSON/code UUIDs). Inherit uses Storage Manager → File Interfaces.',
+			note: 'When the parent item is deleted. Only acts if the file is not used elsewhere. Recycle requires Recycle Bin On. Inherit uses Storage Manager → File Interfaces.',
 		},
 	},
 ] as const;

@@ -50,6 +50,8 @@ function mapBrowseFolders(folders: StorageBrowseFolder[]): StorageFolderNode[] {
 	return folders.map((folder) => ({
 		name: folder.name,
 		path: folder.path,
+		virtual: folder.virtual,
+		...(folder.virtual ? { children: [], childrenLoaded: true } : {}),
 	}));
 }
 

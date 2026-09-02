@@ -13,6 +13,7 @@ const systemDefaults = {
 		subtitle: '{{ type }} • {{ filesize }}',
 		size: 4,
 		imageFit: 'crop',
+		imageSource: '$thumbnail',
 	} as LayoutOptions,
 	layoutQuery: {
 		sort: ['-uploaded_on'],

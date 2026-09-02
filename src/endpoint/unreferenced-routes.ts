@@ -106,6 +106,81 @@ async function loadFilesByIds(database: any, ids: string[]) {
 	return ids.map((id) => byId.get(String(id))).filter(Boolean) as Record<string, unknown>[];
 }
 
+const ALLOWED_FILE_SORT = new Set([
+	'id',
+	'title',
+	'type',
+	'filesize',
+	'storage',
+	'folder',
+	'uploaded_on',
+	'modified_on',
+	'created_on',
+	'filename_download',
+	'filename_disk',
+]);
+
+function parseSortParam(raw: unknown): { column: string; desc: boolean } | null {
+	const first = Array.isArray(raw) ? raw[0] : raw;
+	if (first == null || first === '') return null;
+	const token = String(first);
+	const desc = token.startsWith('-');
+	const column = desc ? token.slice(1) : token;
+	if (!ALLOWED_FILE_SORT.has(column)) return null;
+	return { column, desc };
+}
+
+function compareSortValues(a: unknown, b: unknown, desc: boolean): number {
+	const emptyA = a == null || a === '';
+	const emptyB = b == null || b === '';
+	if (emptyA && emptyB) return 0;
+	if (emptyA) return 1;
+	if (emptyB) return -1;
+	const na = Number(a);
+	const nb = Number(b);
+	if (Number.isFinite(na) && Number.isFinite(nb) && String(a).trim() !== '' && String(b).trim() !== '') {
+		return desc ? nb - na : na - nb;
+	}
+	const sa = String(a).toLowerCase();
+	const sb = String(b).toLowerCase();
+	const cmp = sa.localeCompare(sb, undefined, { numeric: true, sensitivity: 'base' });
+	return desc ? -cmp : cmp;
+}
+
+/** Order session ids by a directus_files column (chunked `WHERE IN`). */
+async function sortFileIds(
+	database: any,
+	ids: string[],
+	sort: { column: string; desc: boolean },
+): Promise<string[]> {
+	if (!ids.length) return ids;
+	const CHUNK = 500;
+	const values = new Map<string, unknown>();
+	for (let i = 0; i < ids.length; i += CHUNK) {
+		const chunk = ids.slice(i, i + CHUNK);
+		const rows: Array<Record<string, unknown>> = await database('directus_files')
+			.select('id', sort.column)
+			.whereIn('id', chunk);
+		for (const row of rows) {
+			values.set(String(row.id), row[sort.column]);
+		}
+	}
+	return [...ids].sort((a, b) => compareSortValues(values.get(a), values.get(b), sort.desc));
+}
+
+/** Sum `filesize` for the given ids (chunked `WHERE IN`). */
+async function sumFilesizeByIds(database: any, ids: string[]): Promise<number> {
+	if (!ids.length) return 0;
+	const CHUNK = 500;
+	let total = 0;
+	for (let i = 0; i < ids.length; i += CHUNK) {
+		const chunk = ids.slice(i, i + CHUNK);
+		const row = await database('directus_files').whereIn('id', chunk).sum({ total: 'filesize' }).first();
+		total += Number(row?.total) || 0;
+	}
+	return total;
+}
+
 function parseFilterParam(raw: unknown): Record<string, unknown> | null {
 	if (!raw) return null;
 	try {
@@ -385,10 +460,29 @@ export function registerUnreferencedRoutes(router: Router, context: EndpointCont
 				session.filterCache = { key: filterKey, ids: matchedIds };
 			}
 
+			const sort = parseSortParam(req.query.sort);
+			if (sort) {
+				matchedIds = await sortFileIds(database, matchedIds, sort);
+			}
+
 			const total = matchedIds.length;
 			const offset = (page - 1) * limit;
 			const pageIds = matchedIds.slice(offset, offset + limit);
 			const data = await loadFilesByIds(database, pageIds);
+
+			let totalBytes: number;
+			if (!filter && !search && typeof session.meta.unreferenced_bytes === 'number') {
+				totalBytes = session.meta.unreferenced_bytes;
+			} else if (session.filterCache?.key === filterKey && typeof session.filterCache.bytes === 'number') {
+				totalBytes = session.filterCache.bytes;
+			} else {
+				totalBytes = await sumFilesizeByIds(database, matchedIds);
+				if (session.filterCache?.key === filterKey) {
+					session.filterCache.bytes = totalBytes;
+				} else if (filter || search) {
+					session.filterCache = { key: filterKey, ids: matchedIds, bytes: totalBytes };
+				}
+			}
 
 			res.json({
 				data,
@@ -396,6 +490,8 @@ export function registerUnreferencedRoutes(router: Router, context: EndpointCont
 					scan_id: session.id,
 					total_count: total,
 					filter_count: total,
+					total_bytes: totalBytes,
+					filtered: Boolean(filter || search),
 					page,
 					limit,
 				},

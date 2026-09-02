@@ -11,6 +11,7 @@ export type UploadPreset = {
 type UploadOptions = {
 	/** Fields merged into each POST /files FormData (storage, folder, …) */
 	preset: MaybeRef<UploadPreset>;
+	enabled?: MaybeRef<boolean>;
 	onDone?: () => void | Promise<void>;
 };
 
@@ -51,7 +52,12 @@ export function useDropUpload(options: UploadOptions) {
 		}
 	}
 
+	function dropEnabled() {
+		return unref(options.enabled) !== false;
+	}
+
 	function onDragEnter(event: DragEvent) {
+		if (!dropEnabled()) return;
 		if (!event.dataTransfer) return;
 		if (event.dataTransfer.types.indexOf('Files') === -1) return;
 
@@ -94,6 +100,7 @@ export function useDropUpload(options: UploadOptions) {
 	}
 
 	async function onDrop(event: DragEvent) {
+		if (!dropEnabled()) return;
 		if (!event.dataTransfer) return;
 		if (event.dataTransfer.types.indexOf('Files') === -1) return;
 
@@ -139,7 +146,7 @@ export function useDropUpload(options: UploadOptions) {
 	}
 
 	async function uploadFiles(files: globalThis.File[]) {
-		if (!files.length || uploading.value) return;
+		if (!dropEnabled() || !files.length || uploading.value) return;
 
 		uploading.value = true;
 

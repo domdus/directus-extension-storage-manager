@@ -169,7 +169,7 @@ function setOpenStorageFolders() {
 	<v-list nav>
 		<v-list-item clickable :active="isOverview" @click="goOverview">
 			<v-list-item-icon>
-				<v-icon name="dashboard" />
+				<v-icon name="storage" />
 			</v-list-item-icon>
 			<v-list-item-content>
 				<v-text-overflow text="Storage Manager" />
