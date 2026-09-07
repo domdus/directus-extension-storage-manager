@@ -134,7 +134,7 @@ Open **Recycle Bin** from the left sidebar for an opt-in File Library quarantine
 
 Turn **On** to create `storage_manager_trashed_at` on `directus_files` and a recycle folder (default **`_Recycle`** — you can pick another File Library folder while Off). Unreferenced Files can move selections here. You can also **Move to Recycle** from a storage or Directus Folders browse when files or folders are selected.
 
-On each storage browse page, Recycle files for that adapter appear in a virtual folder of the same name (objects stay at their original keys). From there you can restore selected files, or use **Restore All**. Restore always returns files to the File Library root — storage keys do not move.
+On each storage browse page, Recycle files for that adapter appear in a virtual folder of the same name at the top of the folder list (objects stay at their original keys). In **Directus Folders** and the native File Library, `_Recycle` is listed first (the `_` prefix is not enough on its own — many languages sort it as “Recycle”). From there you can restore selected files, or use **Restore All**. Restore always returns files to the File Library root — storage keys do not move.
 
 While On you can:
 

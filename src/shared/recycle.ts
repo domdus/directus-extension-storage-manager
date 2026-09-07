@@ -30,6 +30,27 @@ export const RECYCLE_DEFAULTS: RecycleSettings = {
 	purge_flow_id: null,
 };
 
+/**
+ * Nav / picker order for Directus folders.
+ * `localeCompare` ignores `_` in many locales (de, en), so `_Recycle` sorted as “Recycle”.
+ * Recycle folder id first, then `_`-prefixed names, then A–Z.
+ */
+export function compareFoldersForNav(
+	a: { id?: string; name: string },
+	b: { id?: string; name: string },
+	recycleFolderId?: string | null,
+): number {
+	if (recycleFolderId) {
+		const aRecycle = a.id === recycleFolderId;
+		const bRecycle = b.id === recycleFolderId;
+		if (aRecycle !== bRecycle) return aRecycle ? -1 : 1;
+	}
+	const aSpecial = a.name.startsWith('_');
+	const bSpecial = b.name.startsWith('_');
+	if (aSpecial !== bSpecial) return aSpecial ? -1 : 1;
+	return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+}
+
 /** Storage-browse path for the virtual Recycle folder (single path segment). */
 export function recycleStorageFolderName(folderName: string | null | undefined): string {
 	const raw = String(folderName || RECYCLE_DEFAULT_FOLDER_NAME)

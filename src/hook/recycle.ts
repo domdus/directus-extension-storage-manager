@@ -26,6 +26,22 @@ export function registerRecycleHooks(
 	{ filter, action, init }: { filter: any; action: any; init: any },
 	{ database, logger }: HookContext,
 ) {
+	filter('folders.read', async (payload: any) => {
+		try {
+			const recycleId = await resolveRecycleFolderId(database);
+			if (!recycleId || !Array.isArray(payload) || payload.length < 2) return payload;
+			const idx = payload.findIndex((row: any) => row && String(row.id) === recycleId);
+			if (idx <= 0) return payload;
+			const next = payload.slice();
+			const [row] = next.splice(idx, 1);
+			next.unshift(row);
+			return next;
+		} catch (err: any) {
+			logger.warn(`[storage-manager] Recycle folder pin failed: ${err?.message || err}`);
+		}
+		return payload;
+	});
+
 	filter('files.create', async (input: Record<string, any>) => {
 		try {
 			const recycleId = await resolveRecycleFolderId(database);

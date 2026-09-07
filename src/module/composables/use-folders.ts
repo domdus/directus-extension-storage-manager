@@ -1,5 +1,6 @@
 import { useApi } from '@directus/extensions-sdk';
 import { computed, ref, type Ref } from 'vue';
+import { compareFoldersForNav } from '../../shared/recycle';
 
 export type FolderRaw = {
 	id: string;
@@ -26,7 +27,7 @@ const folders = ref<Folder[] | null>(null);
 const globalNestedFolders = ref<Folder[] | null>(null);
 const globalOpenFolders = ref<string[]>([...OPEN_FOLDERS_INITIAL]);
 
-export function nestFolders(rawFolders: FolderRaw[]): Folder[] {
+export function nestFolders(rawFolders: FolderRaw[], recycleFolderId?: string | null): Folder[] {
 	const childrenMap = new Map<string, FolderRaw[]>();
 
 	for (const folder of rawFolders) {
@@ -37,18 +38,21 @@ export function nestFolders(rawFolders: FolderRaw[]): Folder[] {
 		}
 	}
 
+	const sortSiblings = (list: FolderRaw[]) =>
+		[...list].sort((a, b) => compareFoldersForNav(a, b, recycleFolderId));
+
 	const buildTree = (folder: FolderRaw): Folder => {
 		const children = childrenMap.get(folder.id) || [];
 		if (children.length > 0) {
 			return {
 				...folder,
-				children: children.map(buildTree),
+				children: sortSiblings(children).map(buildTree),
 			};
 		}
 		return { ...folder };
 	};
 
-	return rawFolders.filter((folder) => folder.parent === null).map(buildTree);
+	return sortSiblings(rawFolders.filter((folder) => folder.parent === null)).map(buildTree);
 }
 
 function findFolder(tree: Folder[] | null, id: string | undefined): Folder[] | null {
@@ -90,21 +94,34 @@ export function useFolders(): UsableFolders {
 
 	return { loading, folders, nestedFolders, fetchFolders, openFolders };
 
+	async function loadRecycleFolderId(apiClient: ReturnType<typeof useApi>): Promise<string | null> {
+		try {
+			const res = await apiClient.get('/storage-manager/recycle');
+			const id = res.data?.data?.folder_id;
+			return id ? String(id) : null;
+		} catch {
+			return null;
+		}
+	}
+
 	async function fetchFolders() {
 		if (loading.value) return;
 		loading.value = true;
 
 		try {
-			const response = await api.get('/folders', {
-				params: {
-					sort: 'name',
-					limit: -1,
-					fields: ['id', 'name', 'parent'],
-				},
-			});
+			const [response, recycleId] = await Promise.all([
+				api.get('/folders', {
+					params: {
+						sort: 'name',
+						limit: -1,
+						fields: ['id', 'name', 'parent'],
+					},
+				}),
+				loadRecycleFolderId(api),
+			]);
 			const data = (response.data?.data || []) as FolderRaw[];
 			folders.value = data;
-			globalNestedFolders.value = nestFolders(data);
+			globalNestedFolders.value = nestFolders(data, recycleId);
 		} catch {
 			folders.value = [];
 			globalNestedFolders.value = [];

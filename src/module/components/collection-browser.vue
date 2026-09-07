@@ -40,6 +40,7 @@ import { getFolderFilter, getRecycleStorageFilter, getStorageFilter, mergeFilter
 import { DIRECTUS_FOLDERS_PAGE_INTRO, VIRTUAL_FOLDER_NOTE } from '../../shared/strategies';
 import { formatBytes } from '../../shared/format';
 import { storageManagerPath } from '../../shared/storage-path-url';
+import { compareFoldersForNav } from '../../shared/recycle';
 import type { StorageBrowseFolder } from '../../shared/types';
 
 const props = defineProps<{
@@ -224,7 +225,7 @@ const childDirectusFolders = computed(() => {
 	return folders.value
 		.filter((folder) => (parent ? folder.parent === parent : folder.parent == null))
 		.slice()
-		.sort((a, b) => a.name.localeCompare(b.name));
+		.sort((a, b) => compareFoldersForNav(a, b, recycleFolderId.value));
 });
 
 const breadcrumb = computed(() => {
