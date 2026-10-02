@@ -22,16 +22,6 @@
 		</template>
 
 		<div :class="pageClass">
-			<v-divider
-				class="section-divider"
-				large
-				:inline-title="false"
-				:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
-			>
-				<template #icon><v-icon name="policy" /></template>
-				File Lifecycle Defaults
-			</v-divider>
-
 			<p class="page-intro">
 				What happens to a file when a field is deselected/cleared or the collection item holding it is deleted.
 				<strong>Move to Recycle Bin</strong> requires Recycle Bin to be On; otherwise the file is kept.
@@ -180,10 +170,6 @@ onMounted(() => {
 	padding: var(--content-padding);
 	padding-block-end: var(--content-padding);
 	max-inline-size: 67.5rem;
-}
-
-.section-divider {
-	margin-block-end: 0.75rem;
 }
 
 .page-intro {

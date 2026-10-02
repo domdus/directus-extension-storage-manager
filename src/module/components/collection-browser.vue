@@ -1727,16 +1727,6 @@ function bindLayout(layoutState: Record<string, any>) {
 			</template>
 
 			<div v-if="showFoldersPageIntro" :class="pageClass">
-				<v-divider
-					class="section-divider"
-					large
-					:inline-title="false"
-					:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
-				>
-					<template #icon><v-icon name="folder_special" /></template>
-					Directus Folders
-				</v-divider>
-
 				<p class="page-intro">{{ DIRECTUS_FOLDERS_PAGE_INTRO }}</p>
 			</div>
 
@@ -2116,10 +2106,6 @@ function bindLayout(layoutState: Record<string, any>) {
 
 .page-container--flush-top {
 	padding-block-start: 0;
-}
-
-.section-divider {
-	margin-bottom: 12px;
 }
 
 .page-intro {

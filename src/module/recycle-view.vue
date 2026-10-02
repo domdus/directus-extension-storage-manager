@@ -38,13 +38,22 @@
 			</sidebar-detail>
 
 			<sidebar-detail id="about" icon="info" title="About" :close="false">
-				<p class="sidebar-text">
-					Isolation is the point. Files stay in the File Library, but
-					<code>/assets</code> returns 404 (no thumbnails in collections or Studio), and they cannot be
-					found in file interfaces, search, or the picker unless you open this folder on purpose. If
-					still-used content was quarantined, the gap shows up immediately — move the file out of Recycle
-					to restore it.
-				</p>
+				<div class="sidebar-about">
+					<p class="sidebar-text">
+						Opt-in quarantine for the File Library. Isolation is the point. Files stay registered, but
+						<code>/assets</code> returns 404 (no thumbnails in collections or Studio), and they cannot be
+						found in file interfaces, search, or the picker unless you open this folder on purpose. If
+						still-used content was quarantined, the gap shows up immediately — move the file out of Recycle
+						to restore access.
+					</p>
+					<p class="sidebar-text">
+						Enabling creates <code>storage_manager_trashed_at</code> on <code>directus_files</code> and a
+						folder (default: <code>_Recycle</code>).
+						<button type="button" class="text-link" @click="goUnreferenced">Unreferenced Files</button>
+						can move selections here instead of deleting immediately — any other File Library file can be
+						moved into this folder as well.
+					</p>
+				</div>
 			</sidebar-detail>
 		</template>
 
@@ -55,26 +64,15 @@
 				:inline-title="false"
 				:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
 			>
-				<template #icon><v-icon name="recycling" /></template>
-				Recycle Bin
+				<template #icon><v-icon name="toggle_on" /></template>
+				Status
 			</v-divider>
-
-			<p class="page-intro">
-				Opt-in quarantine for the File Library. Files in Recycle stay registered, but they are isolated:
-				<code>/assets</code> returns 404 (no thumbnails in collections or Studio), and they cannot be
-				searched or picked in file interfaces. If something still needed that file, the gap shows up
-				immediately — move it out of Recycle to restore access. Enabling creates
-				<code>storage_manager_trashed_at</code> on <code>directus_files</code> and a folder (default:
-				<code>_Recycle</code>). Unreferenced Files can move selections here instead of deleting immediately —
-				any other File Library file can be moved into this folder as well.
-			</p>
 
 			<div v-if="recycleLoading" class="result">
 				<v-progress-circular indeterminate />
 			</div>
 			<template v-else>
 				<div class="side-field">
-					<label>Status</label>
 					<div class="status-radios" role="radiogroup" aria-label="Recycle Bin status">
 						<v-radio
 							:model-value="recycle.enabled"
@@ -410,6 +408,10 @@ function goToRecycleFolder() {
 	void router.push(`/storage-manager/folders/${id}`);
 }
 
+function goUnreferenced() {
+	void router.push('/storage-manager/unreferenced');
+}
+
 async function onRestoreAllDone() {
 	restoreDrawerOpen.value = false;
 	await loadRecycle();
@@ -650,7 +652,6 @@ async function purgeRecycle(dryRun: boolean) {
 	margin-block-end: 0.75rem;
 }
 
-.page-intro,
 .sidebar-text {
 	margin: 0 0 1.25rem;
 	color: var(--theme--foreground);
@@ -659,6 +660,31 @@ async function purgeRecycle(dryRun: boolean) {
 
 .sidebar-text--tight {
 	margin-bottom: 0.85rem;
+}
+
+.sidebar-about {
+	display: flex;
+	flex-direction: column;
+	gap: 0.85rem;
+}
+
+.sidebar-about .sidebar-text {
+	margin: 0;
+}
+
+.text-link {
+	display: inline;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--theme--primary);
+	font: inherit;
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.text-link:hover {
+	text-decoration: underline;
 }
 
 .sidebar-actions {
@@ -696,7 +722,6 @@ async function purgeRecycle(dryRun: boolean) {
 	border-color: var(--theme--primary-accent);
 }
 
-.page-intro code,
 .sidebar-text code,
 .field-hint code,
 .v-card-text code {

@@ -157,16 +157,6 @@
 		</template>
 
 		<div :class="pageClass">
-			<v-divider
-				class="section-divider"
-				large
-				:inline-title="false"
-				:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
-			>
-				<template #icon><v-icon name="link_off" /></template>
-				Find Unreferenced Files
-			</v-divider>
-
 			<p class="page-intro">
 				Dry-run scan of the File Library. Select files to move into a Directus folder, relocate on storage,
 				or delete (delete always re-checks references first).
@@ -1057,10 +1047,6 @@ onMounted(async () => {
 .page-intro code {
 	font-family: var(--theme--fonts--monospace--font-family, monospace);
 	font-size: 0.9em;
-}
-
-.section-divider {
-	margin-block-end: 0.75rem;
 }
 
 .scan-bar {

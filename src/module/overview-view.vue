@@ -9,10 +9,16 @@
 		</template>
 
 		<template #sidebar>
-			<sidebar-detail id="about" icon="info" title="About">
+			<sidebar-detail id="about" icon="info" title="About" :close="false">
 				<p class="sidebar-text">
-					Move files between configured storage adapters and manage physical storage folders. Use Directus
-					Folders view to materialize virtual folders into real storage paths.
+					Browse, create, and move files and storage folders across your adapters. Use Materialize in
+					<button type="button" class="text-link" @click="goFolders">Directus Folders</button>
+					view to convert virtual folder hierarchy into physical storage paths. Use
+					<button type="button" class="text-link" @click="goUnreferenced">Unreferenced Files</button>
+					to find leftover File Library entries, and
+					<button type="button" class="text-link" @click="goFileInterfaces">File Interfaces</button>
+					to set automatic cleanup when fields are cleared or items are deleted (including native Directus
+					File / Image / Files fields).
 				</p>
 			</sidebar-detail>
 		</template>
@@ -25,23 +31,62 @@
 			<v-notice v-else-if="storagesError" type="danger">{{ storagesError }}</v-notice>
 
 			<template v-else>
-				<v-divider
-					class="section-divider"
-					large
-					:inline-title="false"
-					:style="{ '--v-divider-color': 'var(--theme--border-color-subdued)' }"
-				>
-					<template #icon><v-icon name="swap_horiz" /></template>
-					Storage Manager
-				</v-divider>
-
-				<p class="page-intro">
-					Browse, create, and move files and storage folders across your adapters. Use Materialize in
-					Directus Folders view to convert virtual folder hierarchy into physical storage paths. Use
-					<strong>Unreferenced Files</strong> to find leftover File Library entries, and
-					<strong>File Interfaces</strong> to set automatic cleanup when fields are cleared or items are
-					deleted (including native Directus File / Image / Files fields).
-				</p>
+				<section class="summary-bar" aria-label="Storage totals">
+					<div class="stat">
+						<span class="stat-value">{{ summary.files.toLocaleString() }}</span>
+						<span class="stat-label">
+							{{ summary.files === 1 ? 'File' : 'Files' }}
+							<v-icon
+								v-tooltip.top="'File Library entries across all adapters. Recycle Bin files are excluded.'"
+								name="help_outline"
+								small
+								class="stat-info"
+							/>
+						</span>
+					</div>
+					<div class="stat">
+						<span class="stat-value">{{ summary.folders == null ? '…' : summary.folders.toLocaleString() }}</span>
+						<span class="stat-label">
+							{{ summary.folders === 1 ? 'Folder' : 'Folders' }}
+							<v-icon
+								v-tooltip.top="'Physical storage folders (path prefixes on disk / cloud), not Directus virtual folders.'"
+								name="help_outline"
+								small
+								class="stat-info"
+							/>
+						</span>
+					</div>
+					<div class="stat">
+						<span class="stat-value">{{ formatBytes(summary.bytes) }}</span>
+						<span class="stat-label">
+							Volume
+							<v-icon
+								v-tooltip.top="'Sum of File Library filesize across all adapters. Recycle Bin is excluded.'"
+								name="help_outline"
+								small
+								class="stat-info"
+							/>
+						</span>
+					</div>
+					<div class="stat">
+						<span class="stat-value">{{ formatBytes(summary.avgBytes) }}</span>
+						<span class="stat-label">
+							Avg. File
+							<v-icon
+								v-tooltip.top="'Average File Library filesize (total volume ÷ file count).'"
+								name="help_outline"
+								small
+								class="stat-info"
+							/>
+						</span>
+					</div>
+					<div class="stat">
+						<span class="stat-value">{{ summary.adapters.toLocaleString() }}</span>
+						<span class="stat-label">
+							{{ summary.adapters === 1 ? 'Adapter' : 'Adapters' }}
+						</span>
+					</div>
+				</section>
 
 				<div class="storage-grid">
 					<article v-for="storage in storages" :key="storage.location" class="storage-card">
@@ -98,7 +143,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useApi } from '@directus/extensions-sdk';
 import ModuleNavigation from './navigation.vue';
@@ -107,6 +152,7 @@ import { usePageClass } from './composables/use-page-class';
 import { useStorageManager } from './composables/use-storage-manager';
 import { storageManagerPath } from '../shared/storage-path-url';
 import { directusFolderMirrorPatch } from '../shared/settings';
+import { formatBytes } from '../shared/format';
 
 const router = useRouter();
 const api = useApi();
@@ -114,6 +160,25 @@ const pageClass = usePageClass();
 const { storages, storagesError, loadStorages } = useStorageManager();
 const loading = ref(true);
 const savingMirror = reactive<Record<string, boolean>>({});
+
+const summary = computed(() => {
+	const list = storages.value;
+	const files = list.reduce((sum, storage) => sum + (storage.file_count || 0), 0);
+	const bytes = list.reduce((sum, storage) => sum + (storage.total_bytes || 0), 0);
+	const foldersPending = list.some((storage) => storage.folder_count == null);
+	const folders = foldersPending
+		? null
+		: list.reduce((sum, storage) => sum + (storage.folder_count || 0), 0);
+	const adapters = list.length;
+	const avgBytes = files > 0 ? bytes / files : 0;
+	return {
+		files,
+		bytes,
+		folders,
+		adapters,
+		avgBytes,
+	};
+});
 
 async function refresh() {
 	loading.value = true;
@@ -147,6 +212,18 @@ function goStorage(location: string) {
 	router.push(storageManagerPath(location));
 }
 
+function goFolders() {
+	router.push('/storage-manager/folders');
+}
+
+function goUnreferenced() {
+	router.push('/storage-manager/unreferenced');
+}
+
+function goFileInterfaces() {
+	router.push('/storage-manager/file-interfaces');
+}
+
 onMounted(refresh);
 </script>
 
@@ -161,20 +238,69 @@ onMounted(refresh);
 	padding-block-start: 0;
 }
 
-.section-divider {
-	margin-bottom: 12px;
-}
-
-.page-intro,
 .sidebar-text {
-	margin: 0 0 24px;
+	margin: 0;
 	line-height: 1.55;
 	color: var(--theme--foreground);
 }
 
-.sidebar-text code {
-	font-family: var(--theme--fonts--monospace--font-family, monospace);
-	font-size: 0.9em;
+.text-link {
+	display: inline;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--theme--primary);
+	font: inherit;
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.text-link:hover {
+	text-decoration: underline;
+}
+
+.summary-bar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	margin: 0 0 1.25rem;
+	inline-size: 100%;
+}
+
+.stat {
+	display: inline-flex;
+	flex: 1 1 auto;
+	align-items: baseline;
+	gap: 0.4rem;
+	min-inline-size: max-content;
+	padding: 0.4rem 0.7rem;
+	border: var(--theme--border-width) solid var(--theme--border-color-subdued);
+	border-radius: var(--theme--border-radius);
+	background: var(--theme--background-subdued);
+	white-space: nowrap;
+}
+
+.stat-value {
+	font-size: 0.9rem;
+	font-weight: 700;
+	line-height: 1.3;
+	color: var(--theme--foreground);
+	font-variant-numeric: tabular-nums;
+}
+
+.stat-label {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--theme--foreground-subdued);
+}
+
+.stat-info {
+	--v-icon-color: var(--theme--foreground-subdued);
+	cursor: pointer;
+	flex-shrink: 0;
 }
 
 .loading {
