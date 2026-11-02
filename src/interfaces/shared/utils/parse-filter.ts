@@ -9,7 +9,7 @@ export function parseFilter(filter: Filter | null): Filter {
 
 	const accountability = {
 		role: currentUser.role?.id ?? null,
-		roles: currentUser.roles?.map((role) => role.id) ?? [],
+		roles: currentUser.roles?.map((role: { id: string }) => role.id) ?? [],
 		user: currentUser.id,
 	} as Accountability;
 

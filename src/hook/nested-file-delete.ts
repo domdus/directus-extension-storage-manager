@@ -37,7 +37,7 @@ export async function captureNestedFilesForDelete(
 }
 
 export async function deleteNestedFileObjects(
-	files: NestedFileRef[],
+	files: Array<Pick<NestedFileRef, 'storage' | 'filename_disk'>>,
 	logger?: { warn: (msg: string) => void },
 ): Promise<void> {
 	if (!files.length) return;

@@ -30,6 +30,7 @@ import { STORAGE_MANAGER_FIELD, STORAGE_MANAGER_LOCATION_DEFAULTS } from '../sha
 import { ensureSettingsField, getLocationSettings, invalidateSettingsCache, loadSettings } from '../hook/settings';
 import { isDirectusFolderMirrorEnabled } from '../hook/prefix';
 import { materializeDryRun, materializeRun } from './materialize';
+import { escapeLike, filenameEqualsClause, filenamePrefixClause } from './filename-clause';
 import { checkForUpdates } from './update-check';
 import { countRootTransforms, deleteAllRootTransforms, listRootTransforms } from './root-transforms';
 import { registerUnreferencedRoutes } from './unreferenced-routes';
@@ -95,12 +96,12 @@ type FileScopeBody = {
 	recursive?: boolean;
 };
 
-function applySourceFolderPrefixes(query: any, folders: string[]) {
+function applySourceFolderPrefixes(query: any, database: any, folders: string[]) {
 	const prefixes = folders.map((p) => normalizeStoragePath(p)).filter(Boolean);
 	if (!prefixes.length) return;
 	query.where(function (this: any) {
 		for (const prefix of prefixes) {
-			this.orWhere('filename_disk', prefix).orWhere('filename_disk', 'like', `${prefix}/%`);
+			this.orWhereRaw(...filenameEqualsClause(database, prefix)).orWhereRaw(...filenamePrefixClause(database, `${prefix}/`));
 		}
 	});
 }
@@ -112,13 +113,13 @@ async function applyFileScope(query: any, database: any, body: FileScopeBody): P
 	if (fileIds.length && sourceFolders.length) {
 		query.where(function (this: any) {
 			this.whereIn('id', fileIds).orWhere(function (this: any) {
-				applySourceFolderPrefixes(this, sourceFolders);
+				applySourceFolderPrefixes(this, database, sourceFolders);
 			});
 		});
 	} else if (fileIds.length) {
 		query.whereIn('id', fileIds);
 	} else if (sourceFolders.length) {
-		applySourceFolderPrefixes(query, sourceFolders);
+		applySourceFolderPrefixes(query, database, sourceFolders);
 	}
 
 	if (body.source_storage) {
@@ -133,9 +134,12 @@ async function applyFileScope(query: any, database: any, body: FileScopeBody): P
 		}
 		const prefix = `${sourcePath}/`;
 		if (body.recursive === false) {
-			query.where('filename_disk', 'like', `${prefix}%`).whereNot('filename_disk', 'like', `${prefix}%/%`);
+			// The prefix clause settles case; the slash check only needs to see what follows it.
+			query
+				.whereRaw(...filenamePrefixClause(database, prefix))
+				.whereRaw("filename_disk NOT LIKE ? ESCAPE '!'", [`${escapeLike(prefix)}%/%`]);
 		} else {
-			query.where('filename_disk', 'like', `${prefix}%`);
+			query.whereRaw(...filenamePrefixClause(database, prefix));
 		}
 	}
 
@@ -1019,7 +1023,7 @@ export default {
 				let current: string | null = id;
 
 				for (let i = 0; i < 50 && current; i++) {
-					const row = await database('directus_folders').select('id', 'name', 'parent').where({ id: current }).first();
+					const row: { id: string; name: string; parent?: string | null } | undefined = await database('directus_folders').select('id', 'name', 'parent').where({ id: current }).first();
 					if (!row) break;
 					path.unshift({ id: String(row.id), name: row.name });
 					current = row.parent == null ? null : String(row.parent);

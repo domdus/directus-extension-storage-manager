@@ -16,7 +16,7 @@ export function useRootFileView() {
 	});
 
 	function setRootFileView(view: RootFileView) {
-		const query: Record<string, string | string[]> = { ...route.query };
+		const query: Record<string, any> = { ...route.query };
 		if (view === 'files') {
 			delete query.view;
 		} else {

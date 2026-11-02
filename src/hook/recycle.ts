@@ -42,11 +42,13 @@ export function registerRecycleHooks(
 		return payload;
 	});
 
-	filter('files.create', async (input: Record<string, any>) => {
+	filter('files.create', async (input: Record<string, any>, eventContext?: { database?: any }) => {
+		// May run inside Directus's transaction, where SQLite's only connection is taken.
+		const db = eventContext?.database ?? database;
 		try {
-			const recycleId = await resolveRecycleFolderId(database);
+			const recycleId = await resolveRecycleFolderId(db);
 			if (!recycleId) return input;
-			const settings = await loadSettings(database);
+			const settings = await loadSettings(db);
 			const field = normalizeRecycleSettings(settings.recycle).field || RECYCLE_TRASHED_AT_FIELD;
 			if (String(input.folder || '') === recycleId) {
 				input[field] = new Date().toISOString();
@@ -57,13 +59,15 @@ export function registerRecycleHooks(
 		return input;
 	});
 
-	filter('files.update', async (payload: Record<string, any>, meta: { keys?: string[] }) => {
+	filter('files.update', async (payload: Record<string, any>, meta: { keys?: string[] }, eventContext?: { database?: any }) => {
+		// May run inside Directus's transaction, where SQLite's only connection is taken.
+		const db = eventContext?.database ?? database;
 		try {
 			if (!payload || !('folder' in payload)) return payload;
-			const recycleId = await resolveRecycleFolderId(database);
+			const recycleId = await resolveRecycleFolderId(db);
 			if (!recycleId) return payload;
 
-			const settings = await loadSettings(database);
+			const settings = await loadSettings(db);
 			const field = normalizeRecycleSettings(settings.recycle).field || RECYCLE_TRASHED_AT_FIELD;
 			const nextFolder = payload.folder == null || payload.folder === '' ? null : String(payload.folder);
 
@@ -78,7 +82,7 @@ export function registerRecycleHooks(
 				return payload;
 			}
 
-			const inRecycle = await database('directus_files')
+			const inRecycle = await db('directus_files')
 				.select('id')
 				.whereIn('id', keys)
 				.andWhere({ folder: recycleId });

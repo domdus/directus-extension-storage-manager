@@ -30,8 +30,11 @@ export function shouldReadImageDimensions(type: string | null | undefined): bool
 	return IMAGE_METADATA_TYPES.has(mime) || mime.startsWith('image/');
 }
 
+/** Provided by Directus at runtime, so it must stay out of the bundle and the type graph. */
+const SHARP_MODULE: string = 'sharp';
+
 async function resolveSharp(): Promise<SharpFactory | null> {
-	if (cachedSharp !== undefined) return cachedSharp;
+	if (cachedSharp !== undefined) return cachedSharp ?? null;
 
 	try {
 		const require = createRequire(path.join(process.cwd(), 'package.json'));
@@ -39,18 +42,18 @@ async function resolveSharp(): Promise<SharpFactory | null> {
 		const factory = typeof mod === 'function' ? mod : mod?.default;
 		if (typeof factory === 'function') {
 			cachedSharp = factory;
-			return cachedSharp;
+			return factory;
 		}
 	} catch {
 		// Directus always ships sharp; resolution can still fail in odd layouts.
 	}
 
 	try {
-		const mod: any = await import('sharp');
+		const mod: any = await import(/* @vite-ignore */ SHARP_MODULE);
 		const factory = typeof mod.default === 'function' ? mod.default : mod;
 		if (typeof factory === 'function') {
 			cachedSharp = factory;
-			return cachedSharp;
+			return factory;
 		}
 	} catch {
 		// fall through to header parser

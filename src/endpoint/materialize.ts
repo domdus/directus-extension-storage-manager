@@ -3,6 +3,7 @@ import { diskExists } from './storage';
 import { getStorageManager } from './storage';
 import { migrateOneFile } from './migrate';
 import type {
+	MigrateFileResult,
 	MaterializeDryRunResponse,
 	MaterializeMode,
 	MigrateProgressEvent,
@@ -154,7 +155,7 @@ export async function materializeDryRun(params: {
 
 export async function materializeRun(params: {
 	database: any;
-	logger?: { info: (msg: string) => void; warn: (msg: string) => void };
+	logger?: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void };
 	folderId: string | null;
 	mode: MaterializeMode;
 	targetStorage?: string;
@@ -182,7 +183,7 @@ export async function materializeRun(params: {
 	}
 	const files = (await query) as FileRow[];
 
-	const results: any[] = [];
+	const results: MigrateFileResult[] = [];
 	let succeeded = 0;
 	let failed = 0;
 	let skipped = 0;
@@ -223,7 +224,7 @@ export async function materializeRun(params: {
 			bytes: Number(file.filesize) || 0,
 		});
 		if (params.structureOnly) {
-			const result = {
+			const result: MigrateFileResult = {
 				id: file.id,
 				status: 'skipped',
 				filename_disk: targetPath,
@@ -280,7 +281,7 @@ export async function materializeRun(params: {
 				elapsed_ms: Date.now() - startedAt,
 			});
 		} catch (error: any) {
-			const result = {
+			const result: MigrateFileResult = {
 				id: file.id,
 				status: 'failed',
 				filename_disk: targetPath,

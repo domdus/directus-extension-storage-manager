@@ -1,3 +1,4 @@
+import { filenamePrefixClause } from '../endpoint/filename-clause';
 import { relocateFilesWithPrefixChange } from '../endpoint/physical-folders';
 import type { StorageLocationSettings } from '../shared/types';
 import {
@@ -44,7 +45,7 @@ async function relocatePrefixOnLocations(
 			const countRows = await database('directus_files')
 				.count({ c: '*' })
 				.where('storage', location)
-				.whereRaw('filename_disk LIKE ?', [`${oldPath}/%`])
+				.whereRaw(...filenamePrefixClause(database, `${oldPath}/`))
 				.first();
 			const count = Number((countRows as any)?.c ?? 0);
 			if (count >= LARGE_RELOCATE_WARN) {
