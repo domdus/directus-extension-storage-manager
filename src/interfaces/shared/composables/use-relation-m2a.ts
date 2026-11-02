@@ -25,7 +25,7 @@ export function useRelationM2A(collection: Ref<string>, field: Ref<string>) {
 		const relations = relationsStore.getRelationsForField(collection.value, field.value);
 
 		const junction = relations.find(
-			(relation) =>
+			(relation: any) =>
 				relation.related_collection === collection.value &&
 				relation.meta?.one_field === field.value &&
 				relation.meta.junction_field,
@@ -50,7 +50,7 @@ export function useRelationM2A(collection: Ref<string>, field: Ref<string>) {
 			junctionField: fieldsStore.getField(junction.collection, junction.meta?.junction_field as string),
 			reverseJunctionField: fieldsStore.getField(
 				junction.collection,
-				relations.find((r) => r.collection === junction.collection)?.meta?.junction_field as string,
+				relations.find((r: any) => r.collection === junction.collection)?.meta?.junction_field as string,
 			),
 			collectionField: fieldsStore.getField(junction.collection, junction.meta?.one_collection_field as string),
 			junction,

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Transform } from 'node:stream';
 import path from 'node:path';
 import {
@@ -158,6 +159,27 @@ async function migrateRelatedAssets(
  * (`{stem}__{hash}.ext`) when the driver supports list(). Source (and transforms)
  * are only deleted after the target is verified and the DB row is updated (move).
  */
+async function contentHash(disk: StorageDisk, filename: string): Promise<string> {
+	const hash = createHash('sha256');
+	for await (const chunk of (await diskRead(disk, filename)) as AsyncIterable<Buffer>) hash.update(chunk);
+	return hash.digest('hex');
+}
+
+async function sameContent(
+	sourceDisk: StorageDisk,
+	sourceFile: string,
+	targetDisk: StorageDisk,
+	targetFile: string,
+): Promise<boolean> {
+	const [source, target] = await Promise.all([diskStat(sourceDisk, sourceFile), diskStat(targetDisk, targetFile)]);
+	if (source.size !== target.size) return false;
+	const [sourceHash, targetHash] = await Promise.all([
+		contentHash(sourceDisk, sourceFile),
+		contentHash(targetDisk, targetFile),
+	]);
+	return sourceHash === targetHash;
+}
+
 export async function migrateOneFile(
 	file: FileRow,
 	targetStorage: string,
@@ -211,6 +233,14 @@ export async function migrateOneFile(
 
 	const targetAlreadyExists = await diskExists(targetDisk, targetFilename);
 	if (targetAlreadyExists) {
+		// May be a resumed migration, or an unrelated or half-written file. Only the first is safe to adopt.
+		if (!(await sameContent(sourceDisk, file.filename_disk, targetDisk, targetFilename))) {
+			return {
+				...base,
+				status: 'skipped',
+				error: 'Destination already has a different file at this path — left in place',
+			};
+		}
 		await migrateRelatedAssets(sourceDisk, targetDisk, file.filename_disk, logger);
 		await database('directus_files')
 			.where({ id: file.id })

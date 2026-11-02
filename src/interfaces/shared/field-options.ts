@@ -6,7 +6,7 @@ const MIME_CHOICES = [
 	{ value: 'application/pdf', text: 'application/pdf' },
 ];
 
-type RelationsContext = { m2o?: { related_collection?: string }; o2m?: { collection?: string } };
+type RelationsContext = { m2o?: { related_collection?: string | null }; o2m?: { collection?: string } };
 
 const storageLocationFieldOption = {
 	field: 'storage',
@@ -65,7 +65,7 @@ const lifecycleFieldOptions = [
 export function getStorageFileFieldOptions(
 	relations: RelationsContext,
 	extra: Record<string, unknown>[] = [],
-) {
+): Record<string, any>[] {
 	const collection = relations.m2o?.related_collection;
 
 	return [
@@ -126,7 +126,7 @@ export function getStorageFileFieldOptions(
 	];
 }
 
-export function getStorageFilesFieldOptions(relations: RelationsContext) {
+export function getStorageFilesFieldOptions(relations: RelationsContext): Record<string, any>[] {
 	const collection = relations.m2o?.related_collection;
 
 	return [

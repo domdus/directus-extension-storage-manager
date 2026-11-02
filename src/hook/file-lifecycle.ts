@@ -288,14 +288,16 @@ export function registerFileLifecycleHooks(
 		}
 	}
 
-	filter('items.delete', async (payload: string[] | number[], meta: { collection?: string }) => {
+	filter('items.delete', async (payload: string[] | number[], meta: { collection?: string }, eventContext?: { database?: any }) => {
+		// May run inside Directus's transaction, where SQLite's only connection is taken.
+		const db = eventContext?.database ?? database;
 		try {
 			const collection = String(meta?.collection || '');
 			if (!collection || collection === 'directus_files') return payload;
 
-			const settings = await loadSettings(database);
+			const settings = await loadSettings(db);
 			const lifecycle = normalizeLifecycleSettings(settings.lifecycle ?? LIFECYCLE_DEFAULTS);
-			const fieldMap = await loadFieldLifecycleMap(database);
+			const fieldMap = await loadFieldLifecycleMap(db);
 			const schema = await getSchema();
 			const allRelations: any[] = Array.isArray(schema?.relations) ? schema.relations : [];
 			const fileRelations = discoverFileRelations(schema);
@@ -329,7 +331,7 @@ export function registerFileLifecycleHooks(
 			const bucket: PendingCleanup = { deleteIds: [], recycleIds: [] };
 
 			if (directRels.length) {
-				const rows = await database(collection).select('*').whereIn(pk, keys);
+				const rows = await db(collection).select('*').whereIn(pk, keys);
 				for (const row of rows) {
 					for (const rel of directRels) {
 						const fieldOpts = fieldMap.get(`${collection}.${rel.field}`);
@@ -348,7 +350,7 @@ export function registerFileLifecycleHooks(
 				const scan = junctionScans.find((j) => j.table === m2m.junctionTable && j.fileField === m2m.fileField);
 				if (!scan) continue;
 				try {
-					const rows = await database(scan.table)
+					const rows = await db(scan.table)
 						.select(scan.fileField)
 						.whereIn(scan.parentField, keys)
 						.whereNotNull(scan.fileField);
@@ -367,7 +369,7 @@ export function registerFileLifecycleHooks(
 				const policy = lifecycle.native.on_item_delete;
 				for (const scan of junctionScans) {
 					try {
-						const rows = await database(scan.table)
+						const rows = await db(scan.table)
 							.select(scan.fileField)
 							.whereIn(scan.parentField, keys)
 							.whereNotNull(scan.fileField);
@@ -405,15 +407,17 @@ export function registerFileLifecycleHooks(
 		}
 	});
 
-	filter('items.update', async (payload: Record<string, any>, meta: { collection?: string; keys?: string[]; key?: string }) => {
+	filter('items.update', async (payload: Record<string, any>, meta: { collection?: string; keys?: string[]; key?: string }, eventContext?: { database?: any }) => {
+		// May run inside Directus's transaction, where SQLite's only connection is taken.
+		const db = eventContext?.database ?? database;
 		try {
 			const collection = String(meta?.collection || '');
 			if (!collection || collection === 'directus_files') return payload;
 			if (!payload || typeof payload !== 'object') return payload;
 
-			const settings = await loadSettings(database);
+			const settings = await loadSettings(db);
 			const lifecycle = normalizeLifecycleSettings(settings.lifecycle ?? LIFECYCLE_DEFAULTS);
-			const fieldMap = await loadFieldLifecycleMap(database);
+			const fieldMap = await loadFieldLifecycleMap(db);
 			const schema = await getSchema();
 			const allRelations: any[] = Array.isArray(schema?.relations) ? schema.relations : [];
 			const fileRelations = discoverFileRelations(schema);
@@ -439,7 +443,7 @@ export function registerFileLifecycleHooks(
 			// M2O file / image columns on this collection
 			const touchedDirect = directRels.filter((r) => Object.prototype.hasOwnProperty.call(payload, r.field));
 			if (touchedDirect.length) {
-				const rows = await database(collection)
+				const rows = await db(collection)
 					.select([pk, ...touchedDirect.map((t) => t.field)])
 					.whereIn(pk, keys);
 
@@ -474,7 +478,7 @@ export function registerFileLifecycleHooks(
 				if (!deleteKeys.length) continue;
 
 				try {
-					const rows = await database(m2m.junctionTable)
+					const rows = await db(m2m.junctionTable)
 						.select(m2m.fileField)
 						.whereIn(m2m.junctionPk, deleteKeys)
 						.whereNotNull(m2m.fileField);

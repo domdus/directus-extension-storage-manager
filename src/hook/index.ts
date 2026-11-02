@@ -45,7 +45,9 @@ export default defineHook(({ filter, action, init }, { database, env, services, 
 
 	// ── Prefix injection on file upload (Mirror Directus Folders) ──────────
 	// Runs when createOne filters are not skipped (e.g. JSON POST /files without binary).
-	filter('files.create', async (input: Record<string, any>) => {
+	filter('files.create', async (input: Record<string, any>, eventContext?: { database?: any }) => {
+		// May run inside Directus's transaction, where SQLite's only connection is taken.
+		const db = eventContext?.database ?? database;
 		try {
 			const envLocations = String(env['STORAGE_LOCATIONS'] ?? 'local')
 				.split(',')
@@ -53,12 +55,12 @@ export default defineHook(({ filter, action, init }, { database, env, services, 
 				.filter(Boolean);
 			const location: string = String(input.storage ?? envLocations[0] ?? 'local');
 
-			const settings = await loadSettings(database);
+			const settings = await loadSettings(db);
 			const locSettings = getLocationSettings(settings, location);
 
 			if (!isDirectusFolderMirrorEnabled(locSettings)) return input;
 
-			const prefix = await buildPrefix(locSettings, input, database);
+			const prefix = await buildPrefix(locSettings, input, db);
 			if (!prefix) return input;
 
 			const current: string = String(input.filename_disk ?? '');
@@ -105,10 +107,12 @@ export default defineHook(({ filter, action, init }, { database, env, services, 
 		{ oldName: string; newName: string; parent: string | null }
 	>();
 
-	filter('folders.update', async (payload: Record<string, any>, meta: { keys?: string[]; key?: string }) => {
+	filter('folders.update', async (payload: Record<string, any>, meta: { keys?: string[]; key?: string }, eventContext?: { database?: any }) => {
+		// May run inside Directus's transaction, where SQLite's only connection is taken.
+		const db = eventContext?.database ?? database;
 		if (!payload.name) return payload;
 		try {
-			const settings = await loadSettings(database);
+			const settings = await loadSettings(db);
 			const hasSyncLocation = Object.values(settings.locations).some(
 				(s) => isDirectusFolderMirrorEnabled(s) && isNameMirrorStrategy(s.prefix_strategy),
 			);
@@ -116,7 +120,7 @@ export default defineHook(({ filter, action, init }, { database, env, services, 
 			const keys = meta.keys ?? (meta.key ? [meta.key] : []);
 			const newName = String(payload.name);
 			for (const key of keys) {
-				const row = await database('directus_folders').select('name', 'parent').where('id', key).first();
+				const row = await db('directus_folders').select('name', 'parent').where('id', key).first();
 				if (row) {
 					pendingRenameClaims.set(key, {
 						oldName: String(row.name),
@@ -126,7 +130,7 @@ export default defineHook(({ filter, action, init }, { database, env, services, 
 				}
 
 				if (!hasSyncLocation) continue;
-				const snapshot = await captureFolderRenamePathSnapshot(key, newName, database);
+				const snapshot = await captureFolderRenamePathSnapshot(key, newName, db);
 				if (snapshot && Object.keys(snapshot).length) {
 					pendingRenames.set(key, snapshot);
 				}
@@ -174,9 +178,11 @@ export default defineHook(({ filter, action, init }, { database, env, services, 
 	const pendingDeleteSiblings = new Map<string, Record<string, string>>();
 	const pendingDeleteClaims = new Map<string, { parent: string | null; name: string }>();
 
-	filter('folders.delete', async (keys: string[]) => {
+	filter('folders.delete', async (keys: string[], _meta: unknown, eventContext?: { database?: any }) => {
+		// May run inside Directus's transaction, where SQLite's only connection is taken.
+		const db = eventContext?.database ?? database;
 		try {
-			const settings = await loadSettings(database);
+			const settings = await loadSettings(db);
 			const hasSyncLocation = Object.values(settings.locations).some((s) =>
 				isDirectusFolderMirrorEnabled(s),
 			);
@@ -185,18 +191,18 @@ export default defineHook(({ filter, action, init }, { database, env, services, 
 			);
 
 			for (const key of keys) {
-				const identity = await captureFolderClaimIdentity(key, database);
+				const identity = await captureFolderClaimIdentity(key, db);
 				if (identity) pendingDeleteClaims.set(key, identity);
 
 				if (!hasSyncLocation) continue;
 
-				const captured = await captureFolderDeletePaths(key, database, settings.locations);
+				const captured = await captureFolderDeletePaths(key, db, settings.locations);
 				if (Object.keys(captured.folderPaths).length) {
 					pendingDeletePaths.set(key, captured);
 				}
 
 				if (hasRenameSync) {
-					const siblingSnap = await captureSiblingPathsBeforeDelete(key, database);
+					const siblingSnap = await captureSiblingPathsBeforeDelete(key, db);
 					if (siblingSnap && Object.keys(siblingSnap.siblingOldPaths).length) {
 						pendingDeleteSiblings.set(key, siblingSnap.siblingOldPaths);
 					}
@@ -247,9 +253,11 @@ export default defineHook(({ filter, action, init }, { database, env, services, 
 	// filename_disk originals would otherwise remain on disk after a Studio delete.
 	const pendingNestedFileDeletes = new Map<string, { storage: string; filename_disk: string }>();
 
-	filter('files.delete', async (keys: string[]) => {
+	filter('files.delete', async (keys: string[], _meta: unknown, eventContext?: { database?: any }) => {
+		// May run inside Directus's transaction, where SQLite's only connection is taken.
+		const db = eventContext?.database ?? database;
 		try {
-			const nested = await captureNestedFilesForDelete(database, keys);
+			const nested = await captureNestedFilesForDelete(db, keys);
 			for (const file of nested) {
 				pendingNestedFileDeletes.set(file.id, file);
 			}

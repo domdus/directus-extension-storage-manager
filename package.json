@@ -2,7 +2,7 @@
 	"name": "directus-extension-storage-manager",
 	"description": "Browse, upload, detect, materialize, and move Directus files across storages; find unreferenced File Library entries; and quarantine deletes in a Recycle Bin",
 	"icon": "storage",
-	"version": "1.7.2",
+	"version": "1.8.0",
 	"license": "MIT",
 	"keywords": [
 		"directus",
@@ -116,16 +116,22 @@
 		"build": "directus-extension build",
 		"dev": "directus-extension build -w --no-minify",
 		"link": "directus-extension link",
-		"add": "directus-extension add"
+		"add": "directus-extension add",
+		"test": "tsx --test \"src/**/*.test.ts\"",
+		"typecheck": "tsc --noEmit -p .",
+		"test:e2e": "npm run build && node test/e2e/run.mjs"
 	},
 	"devDependencies": {
 		"@directus/extensions-sdk": "^17.0.0",
 		"@types/express": "^4.17.21",
-		"@types/node": "^20.0.0",
+		"@types/lodash-es": "^4.17.12",
+		"@types/node": "^20.19.43",
 		"lodash-es": "^4.17.21",
 		"micromustache": "^8.0.3",
+		"tsx": "^4.23.15",
 		"typescript": "^5.0.0",
 		"vue": "^3.3.7",
+		"vue-router": "^4.6.3",
 		"vuedraggable": "^4.1.0"
 	}
 }

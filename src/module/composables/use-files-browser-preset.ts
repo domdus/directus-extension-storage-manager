@@ -2,8 +2,8 @@ import { ref, watch, type Ref } from 'vue';
 
 const STORAGE_KEY = 'storage-manager-files-preset';
 
-type LayoutOptions = Record<string, any>;
-type LayoutQuery = Record<string, any>;
+export type LayoutOptions = Record<string, any>;
+export type LayoutQuery = Record<string, any>;
 
 const systemDefaults = {
 	layout: 'cards',

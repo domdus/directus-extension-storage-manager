@@ -11,6 +11,7 @@ import {
 	diskWrite,
 	getStorageManager,
 } from './storage';
+import { filenamePrefixClause } from './filename-clause';
 import { getLocationDriver, getLocationRoot } from './usage';
 import { excludeRecycleFolderFromFilesQuery, getVirtualRecycleBrowseFolder, resolveRecycleFolderId } from './recycle';
 import { STORAGE_FOLDER_KEEP, type StorageBrowseFolder, type StorageFolderNode } from '../shared/types';
@@ -83,8 +84,9 @@ export function getStoragePathFileRegex(storagePath: string): string {
 function resolveLocalAbsolute(root: string, relPath: string): string {
 	const cwd = process.env.PWD || process.cwd() || '/directus';
 	const absoluteRoot = path.isAbsolute(root) ? root : path.join(cwd, root);
-	const abs = path.resolve(absoluteRoot, relPath);
-	if (!abs.startsWith(path.resolve(absoluteRoot))) {
+	const resolvedRoot = path.resolve(absoluteRoot);
+	const abs = path.resolve(resolvedRoot, relPath);
+	if (abs !== resolvedRoot && !abs.startsWith(resolvedRoot + path.sep)) {
 		throw new Error('Invalid storage path');
 	}
 	return abs;
@@ -645,7 +647,7 @@ async function countRecycleFilesUnderPrefix(
 	if (!recycleId) return 0;
 	const row = await database('directus_files')
 		.where({ storage: location, folder: recycleId })
-		.whereRaw('filename_disk LIKE ?', [`${folderPath}/%`])
+		.whereRaw(...filenamePrefixClause(database, `${folderPath}/`))
 		.count({ n: '*' })
 		.first();
 	return Number(row?.n ?? row?.['count(*)'] ?? 0) || 0;
@@ -784,11 +786,15 @@ export async function deleteStorageFolders(
 				const query = database('directus_files')
 					.select('id', 'filename_disk')
 					.where('storage', location)
-					.whereRaw('filename_disk LIKE ?', [`${folderPath}/%`]);
+					.whereRaw(...filenamePrefixClause(database, `${folderPath}/`));
 				await excludeRecycleFolderFromFilesQuery(database, query);
 				const rows = await query;
 
-				const realRows = rows.filter((r: any) => !isKeepMarker(String(r.filename_disk || '')));
+				// LIKE ignores case on MySQL and SQLite, so `Photos` must not take `photos` with it.
+				const realRows = rows.filter((r: any) => {
+					const name = String(r.filename_disk || '');
+					return name.startsWith(`${folderPath}/`) && !isKeepMarker(name);
+				});
 				const ids = realRows.map((r: any) => String(r.id));
 
 				if (ids.length) {
@@ -1040,7 +1046,7 @@ async function storageFolderExists(
 	const row = await database('directus_files')
 		.select('id')
 		.where('storage', location)
-		.whereRaw('filename_disk LIKE ?', [`${target}/%`])
+		.whereRaw(...filenamePrefixClause(database, `${target}/`))
 		.first();
 	if (row) return true;
 
@@ -1214,7 +1220,7 @@ export async function relocateFilesWithPrefixChange(
 	const query = database('directus_files')
 		.select('id', 'filename_disk', 'type')
 		.where('storage', location)
-		.whereRaw('filename_disk LIKE ?', [`${fromPrefix}/%`]);
+		.whereRaw(...filenamePrefixClause(database, `${fromPrefix}/`));
 	if (opts?.skipRecycle) {
 		await excludeRecycleFolderFromFilesQuery(database, query);
 	}
