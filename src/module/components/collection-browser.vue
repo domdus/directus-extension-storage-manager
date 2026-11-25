@@ -42,6 +42,7 @@ import { formatBytes } from '../../shared/format';
 import { storageManagerPath } from '../../shared/storage-path-url';
 import { compareFoldersForNav } from '../../shared/recycle';
 import type { StorageBrowseFolder } from '../../shared/types';
+import { getWithScanRetry } from '../utils/scan-retry';
 
 const props = defineProps<{
 	mode: 'folders' | 'storage';
@@ -757,9 +758,14 @@ async function loadStorageFolders() {
 	}
 	foldersLoading.value = true;
 	try {
-		const res = await api.get(`/storage-manager/storages/${encodeURIComponent(props.storage)}/browse`, {
-			params: { path: normalizedStoragePath.value || '' },
-		});
+		const requested = `${props.storage}:${normalizedStoragePath.value || ''}`;
+		const res = await getWithScanRetry(
+			api,
+			`/storage-manager/storages/${encodeURIComponent(props.storage)}/browse`,
+			{ params: { path: normalizedStoragePath.value || '' } },
+			{ isStale: () => requested !== `${props.storage}:${normalizedStoragePath.value || ''}` },
+		);
+		if (requested !== `${props.storage}:${normalizedStoragePath.value || ''}`) return;
 		storageFolders.value = (res.data?.data?.folders || []) as StorageBrowseFolder[];
 		virtualRecycleView.value = Boolean(res.data?.data?.virtual_recycle);
 		if (res.data?.data?.recycle_folder_id) {

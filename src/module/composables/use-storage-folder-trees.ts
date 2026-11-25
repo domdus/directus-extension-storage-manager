@@ -1,5 +1,6 @@
 import { useApi } from '@directus/extensions-sdk';
 import { ref, type Ref } from 'vue';
+import { getWithScanRetry } from '../utils/scan-retry';
 import type { StorageBrowseFolder, StorageFolderNode } from '../../shared/types';
 
 type UsableStorageFolderTrees = {
@@ -67,7 +68,7 @@ export function useStorageFolderTrees(): UsableStorageFolderTrees {
 	}
 
 	async function fetchChildren(location: string, parentPath: string): Promise<StorageFolderNode[]> {
-		const res = await api.get(`/storage-manager/storages/${encodeURIComponent(location)}/browse`, {
+		const res = await getWithScanRetry(api, `/storage-manager/storages/${encodeURIComponent(location)}/browse`, {
 			params: { path: parentPath || '' },
 		});
 		const folders = (res.data?.data?.folders || []) as StorageBrowseFolder[];

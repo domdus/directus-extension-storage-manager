@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction, Router } from 'express';
 import { accountabilityIsAdmin } from '../shared/admin';
+import { invalidateDirectory, ScanInProgressError } from './dir-scan';
 import { migrateFiles } from './migrate';
 import { detectOrphans, deleteOrphans, importOrphans } from './orphans';
 import {
@@ -312,6 +313,12 @@ export default {
 			} catch (error) {
 				next(error);
 			}
+		});
+
+		// Cached folder listings (dir-scan.ts) must not outlive a change made through this extension.
+		router.use((req: Request, res: Response, next: NextFunction) => {
+			if (req.method !== 'GET' && req.method !== 'HEAD') res.on('finish', () => invalidateDirectory());
+			next();
 		});
 
 		registerUnreferencedRoutes(router, context);
@@ -1715,5 +1722,15 @@ export default {
 				}
 			},
 		);
+
+		// A large folder is still being read (dir-scan.ts): answer 202 instead of waiting into the
+		// proxy timeout. The module polls again (getWithScanRetry) until the listing is ready.
+		router.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+			if (error instanceof ScanInProgressError) {
+				res.status(202).json({ data: null, meta: { scanning: true, scanned: error.scanned } });
+				return;
+			}
+			next(error);
+		});
 	},
 };

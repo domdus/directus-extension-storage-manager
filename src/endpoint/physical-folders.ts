@@ -14,6 +14,7 @@ import {
 import { filenamePrefixClause } from './filename-clause';
 import { getLocationDriver, getLocationRoot } from './usage';
 import { excludeRecycleFolderFromFilesQuery, getVirtualRecycleBrowseFolder, resolveRecycleFolderId } from './recycle';
+import { requireDirectoryListing } from './dir-scan';
 import { STORAGE_FOLDER_KEEP, type StorageBrowseFolder, type StorageFolderNode } from '../shared/types';
 
 export function normalizeStoragePath(raw: string | null | undefined): string {
@@ -108,6 +109,11 @@ async function collectImmediateFoldersFromDisk(
 	location: string,
 	parentPath: string,
 	env: Record<string, unknown>,
+	/**
+	 * true (browse): shared cached listing, "scan running" for huge folders (dir-scan.ts).
+	 * false (write paths): fresh read, as before.
+	 */
+	cached = false,
 ): Promise<Set<string>> {
 	const folders = new Set<string>();
 	const driver = getLocationDriver(env, location);
@@ -116,6 +122,13 @@ async function collectImmediateFoldersFromDisk(
 
 	if (driver === 'local' && root) {
 		const abs = resolveLocalAbsolute(root, parent || '.');
+		// shared, cached listing (dir-scan.ts): flat storages with 100k+ files must not be read
+		// again for every browse request; throws ScanInProgressError while a big folder is read
+		if (cached) {
+			const listing = await requireDirectoryListing(abs);
+			for (const name of listing.dirs) folders.add(name);
+			return folders;
+		}
 		try {
 			const entries = await fs.readdir(abs, { withFileTypes: true });
 			for (const entry of entries) {
@@ -269,7 +282,7 @@ export async function browseStorageFolders(
 	const names = new Set<string>();
 
 	for (const name of await collectImmediateFoldersFromDb(database, location, parent)) names.add(name);
-	for (const name of await collectImmediateFoldersFromDisk(location, parent, env)) names.add(name);
+	for (const name of await collectImmediateFoldersFromDisk(location, parent, env, true)) names.add(name);
 	for (const name of await collectKeepFoldersFromDisk(location, parent, env)) names.add(name);
 
 	if (!parent && recycle) names.add(recycle.name);

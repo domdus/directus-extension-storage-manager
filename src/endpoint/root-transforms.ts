@@ -1,8 +1,8 @@
-import fs from 'node:fs/promises';
 import path from 'node:path';
 import { diskDelete, diskExists, diskList, diskStat, getStorageManager } from './storage';
 import { getLocationDriver, getLocationRoot } from './usage';
 import { guessMime } from './orphans';
+import { requireDirectoryListing, scanDirectoryFully } from './dir-scan';
 import {
 	isRootAssetTransform,
 	isRootStorageKey,
@@ -43,31 +43,27 @@ function normalizePage(raw: unknown): number {
 	return Math.floor(n);
 }
 
-async function* iterateLocalRootFilenames(root: string): AsyncGenerator<string> {
+async function* iterateLocalRootFilenames(root: string, full: boolean): AsyncGenerator<string> {
 	const absolute = path.isAbsolute(root) ? root : path.join(process.cwd(), root);
-	let entries;
-	try {
-		entries = await fs.readdir(absolute, { withFileTypes: true });
-	} catch {
-		return;
-	}
+	// shared, cached listing (see dir-scan.ts); throws ScanInProgressError while a big folder is read
+	const listing = full ? await scanDirectoryFully(absolute) : await requireDirectoryListing(absolute);
 
-	for (const entry of entries) {
-		if (!entry.isFile() || !entry.name || entry.name.startsWith('.')) continue;
-		if (entry.name === 'directus-health-file') continue;
-		yield entry.name;
+	for (const name of listing.files) {
+		if (name === 'directus-health-file') continue;
+		yield name;
 	}
 }
 
 async function* iterateRootStorageFilenames(
 	location: string,
 	env: Record<string, unknown>,
+	full = false,
 ): AsyncGenerator<string> {
 	const driver = getLocationDriver(env, location);
 	const root = getLocationRoot(env, location);
 
 	if (driver === 'local' && root) {
-		yield* iterateLocalRootFilenames(root);
+		yield* iterateLocalRootFilenames(root, full);
 		return;
 	}
 
@@ -181,7 +177,7 @@ export async function deleteAllRootTransforms(options: {
 	let scanned = 0;
 	const errors: Array<{ filename_disk: string; error: string }> = [];
 
-	for await (const name of iterateRootStorageFilenames(options.location, options.env)) {
+	for await (const name of iterateRootStorageFilenames(options.location, options.env, true)) {
 		if (!isRootAssetTransform(name)) continue;
 		if (!matchesTransformSearch(name, search)) continue;
 		scanned++;

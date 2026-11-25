@@ -2,6 +2,7 @@ import { useApi, useStores } from '@directus/extensions-sdk';
 import type { Field, Item } from '@directus/types';
 import { computed, ref, watch, type Ref } from 'vue';
 import type { LayoutOptions, LayoutQuery } from './use-files-browser-preset';
+import { getWithScanRetry } from '../utils/scan-retry';
 
 type TransformRow = {
 	filename_disk: string;
@@ -185,7 +186,8 @@ export function useRootTransformsLayout(options: {
 
 		loadingItemCount.value = true;
 		try {
-			const res = await api.get(
+			const res = await getWithScanRetry(
+				api,
 				`/storage-manager/storages/${encodeURIComponent(options.location.value)}/root-transforms/count`,
 				{ params: { search: options.search.value?.trim() || undefined } },
 			);
@@ -208,7 +210,8 @@ export function useRootTransformsLayout(options: {
 		error.value = null;
 
 		try {
-			const res = await api.get(
+			const res = await getWithScanRetry(
+				api,
 				`/storage-manager/storages/${encodeURIComponent(options.location.value)}/root-transforms`,
 				{
 					params: {
@@ -217,6 +220,7 @@ export function useRootTransformsLayout(options: {
 						search: options.search.value?.trim() || undefined,
 					},
 				},
+				{ isStale: () => generation !== loadGeneration },
 			);
 
 			if (generation !== loadGeneration) return;
